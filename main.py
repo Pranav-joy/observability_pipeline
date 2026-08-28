@@ -9,9 +9,15 @@ from fastapi import FastAPI, Request
 from pythonjsonlogger import jsonlogger
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
 
 
 app = FastAPI()
+HTTPXClientInstrumentor().instrument()
+FastAPIInstrumentor.instrument_app(app)
+
 
 # calls the operatelemetry tracer provider to get the tracer for this module
 trace.set_tracer_provider(TracerProvider()) # this tells which tracing system must be used, in this case the default one ,  traceprovide is provider , set_tracer_provider is a method to set the provider
@@ -82,7 +88,7 @@ async def start_process(request_id: str):
 
 @app.post("/start")
 async def start(request: Request):
-    with tracer.start_as_current_span("fucntion_c"):
+    with tracer.start_as_current_span("start_endpoint"):
         request_id = str(uuid.uuid4())
         log("POST /start received", request_id=request_id)
         t0 = time.time()
@@ -96,16 +102,15 @@ async def start(request: Request):
 
 @app.post("/process")
 async def process(request: Request):
-    trace.get_current_span()
-    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-    log("POST /process received", request_id=request_id)
-    t0 = time.time()
-    
-    result = await function_c(request_id)
-    
-    elapsed = round(time.time() - t0, 3)
-    log("POST /process finished", request_id=request_id, elapsed_s=elapsed)
-    return {"result": result, "elapsed_s": elapsed}
+    with tracer.start_as_current_span("process_endpoint"):
+        trace.get_current_span()
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        log("POST /process received", request_id=request_id)
+        t0 = time.time()
+        result = await function_c(request_id)
+        elapsed = round(time.time() - t0, 3)
+        log("POST /process finished", request_id=request_id, elapsed_s=elapsed)
+        return {"result": result, "elapsed_s": elapsed}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True, log_config=LOGGING_CONFIG)
