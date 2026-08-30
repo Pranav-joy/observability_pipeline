@@ -2,8 +2,12 @@ fastapi
 uvicorn[standard]
 httpx
 python-json-logger
+python-multipart
 
 opentelemetry-api
 opentelemetry-sdk
 opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-httpx
+
+motor
+PyJWT
