@@ -50,6 +50,9 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning
     networks:
       - observability-network
+    depends_on:
+      - loki
+    
 
 volumes:
   mongo-data:

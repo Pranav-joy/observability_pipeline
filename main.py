@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
+import traceback
 import uuid
 from contextvars import ContextVar
 from typing import Optional
@@ -11,6 +13,7 @@ import jwt
 import uvicorn
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -25,8 +28,15 @@ app = FastAPI()
 HTTPXClientInstrumentor().instrument()
 FastAPIInstrumentor.instrument_app(app)
 
-trace.set_tracer_provider(TracerProvider())
-tracer = trace.get_tracer(__name__)
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    log("Unhandled exception", exc_info=sys.exc_info())
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+# calls the operatelemetry tracer provider to get the tracer for this module
+trace.set_tracer_provider(TracerProvider()) # this tells which tracing system must be used, in this case the default one ,  traceprovide is provider , set_tracer_provider is a method to set the provider
+tracer = trace.get_tracer(__name__) # this is the tracer object that will be used to create spans for tracing
 
 # --- Auth configuration ---
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-in-prod")
@@ -72,14 +82,39 @@ class UserIdFilter(logging.Filter):
         record.user_id = _current_user_id.get() or ""
         return True
 
+
+class ErrorExtractionFilter(logging.Filter):
+    def filter(self, record):
+        if record.levelno >= logging.ERROR and record.exc_info:
+            exc_type, exc_value, exc_tb = record.exc_info
+            frames = traceback.extract_tb(exc_tb)
+            if frames:
+                last_frame = frames[-1]
+                location = f"{last_frame.filename}:{last_frame.lineno} in {last_frame.name}"
+            else:
+                location = ""
+            record.error = {
+                "type": exc_type.__name__ if exc_type else "",
+                "message": str(exc_value) if exc_value else "",
+                "location": location,
+                "stack_trace": "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+            }
+            record.exc_info = None  # Prevent default traceback logging
+            record.exc_text = None
+        else:
+            record.error = None
+        return True
+
+
 formatter = jsonlogger.JsonFormatter(
-    fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(user_id)s",
+    fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(user_id)s ",
     rename_fields={"levelname": "level", "asctime": "timestamp"},
 )
 
 handler = logging.StreamHandler()
 handler.setFormatter(formatter)
 handler.addFilter(UserIdFilter())
+handler.addFilter(ErrorExtractionFilter())
 
 logger = logging.getLogger("app")
 logger.addHandler(handler)
@@ -89,12 +124,15 @@ logger.propagate = False
 LOGGING_CONFIG = json.loads(open("logging_config.json").read())
 
 
-def log(event: str, **kwargs):
+def log(event: str, exc_info=None, **kwargs):
     current_span = trace.get_current_span()
     span_context = current_span.get_span_context()
     kwargs["trace_id"] = format(span_context.trace_id, "032x")
     kwargs["span_id"] = format(span_context.span_id, "016x")
-    logger.info(event, extra=kwargs)
+    if exc_info:
+        logger.error(event, extra=kwargs, exc_info=exc_info)
+    else:
+        logger.info(event, extra=kwargs)
 
 
 # --- Auth dependency ---
@@ -104,8 +142,9 @@ async def require_auth(
 ):
     # No token + localhost → internal call, allow
     if not credentials and request.client and request.client.host in ("127.0.0.1", "localhost"):
-        _current_user_id.set("internal")
-        request.state.user_id = "internal"
+        user_id = request.headers.get("X-User-ID", "internal")
+        _current_user_id.set(user_id)
+        request.state.user_id = user_id
         return
 
     # No token + not localhost → reject
@@ -140,6 +179,7 @@ async def function_c(request_id: str):
     with tracer.start_as_current_span("function_c"):
         log("function_c started", request_id=request_id)
         await asyncio.sleep(1)
+        raise ValueError("test error to verify error extraction")
         log("function_c completed", request_id=request_id)
         return {"status": "processed"}
 
@@ -149,7 +189,7 @@ async def function_b(request_id: str):
         log("function_b started", request_id=request_id)
         await asyncio.sleep(1)
         log("function_b completed", request_id=request_id)
-        headers = {"X-Request-ID": request_id}
+        headers = {"X-Request-ID": request_id, "X-User-ID": _current_user_id.get() or ""}
         async with httpx.AsyncClient() as client:
             resp = await client.post("http://localhost:8000/process", headers=headers)
         return resp.json()
@@ -175,7 +215,6 @@ async def start_process(request_id: str):
 @app.post("/signin")
 async def signin(body: SigninRequest):
     user_id = body.user_id
-
     user = await db[USERS_COLLECTION].find_one({"user_id": user_id})
     if not user:
         raise HTTPException(status_code=401, detail="Invalid user_id")
