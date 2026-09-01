@@ -1,6 +1,9 @@
 {
     "version": 1,
     "disable_existing_loggers": false,
+    "filters": {
+        "error_extraction": {"()": "main.ErrorExtractionFilter"}
+    },
     "formatters": {
         "default": {
             "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
@@ -17,12 +20,14 @@
         "default": {
             "formatter": "default",
             "class": "logging.StreamHandler",
-            "stream": "ext://sys.stderr"
+            "stream": "ext://sys.stderr",
+            "filters": ["error_extraction"]
         },
         "access": {
             "formatter": "access",
             "class": "logging.StreamHandler",
-            "stream": "ext://sys.stdout"
+            "stream": "ext://sys.stdout",
+            "filters": ["error_extraction"]
         }
     },
     "loggers": {

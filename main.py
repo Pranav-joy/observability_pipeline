@@ -9,6 +9,7 @@ import uuid
 from contextvars import ContextVar
 from typing import Optional
 
+
 import jwt
 import uvicorn
 import httpx
@@ -103,6 +104,15 @@ class ErrorExtractionFilter(logging.Filter):
             record.exc_text = None
         else:
             record.error = None
+        return True
+
+
+class TraceContextFilter(logging.Filter):
+    def filter(self, record):
+        current_span = trace.get_current_span()
+        span_context = current_span.get_span_context()
+        record.trace_id = format(span_context.trace_id, "032x")
+        record.span_id = format(span_context.span_id, "016x")
         return True
 
 
