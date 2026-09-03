@@ -32,13 +32,13 @@ services:
     networks:
       - observability-network
 
-  promtail:
-    image: grafana/promtail:latest
+  alloy:
+    image: grafana/alloy:latest
     volumes:
-      - ./promtail/promtail-config.yml:/etc/promtail/config.yml
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
       - /var/run/docker.sock:/var/run/docker.sock
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-    command: -config.file=/etc/promtail/config.yml
+    command: run /etc/alloy/config.alloy --storage.path=/var/lib/alloy/data
     networks:
       - observability-network
 
@@ -56,6 +56,7 @@ services:
 
 volumes:
   mongo-data:
+  alloy-data:
 
 networks:
   observability-network:

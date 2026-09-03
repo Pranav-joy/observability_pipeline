@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the current observability pipeline implemented in the FastAPI prototype application. The pipeline covers structured JSON logging, OpenTelemetry tracing, and log aggregation via Promtail → Loki → Grafana.
+This document describes the current observability pipeline implemented in the FastAPI prototype application. The pipeline covers structured JSON logging, OpenTelemetry tracing, and log aggregation via Grafana Alloy → Loki → Grafana.
 
 ---
 
@@ -39,7 +39,7 @@ This document describes the current observability pipeline implemented in the Fa
                                │  Docker container logs
                                ▼
                       ┌────────────────┐
-                      │    Promtail    │  scrape via Docker socket
+                      │  Grafana Alloy │  scrape via Docker socket
                       └───────┬────────┘
                               │  HTTP push
                               ▼
@@ -220,12 +220,13 @@ start_endpoint (POST /start)
 
 ### 7. Log Aggregation Pipeline
 
-#### Promtail
+#### Grafana Alloy
 
 - **Discovery:** Docker service discovery via `/var/run/docker.sock`
 - **Target:** All containers on the Docker host
 - **Labels:** `container` (derived from Docker container name)
 - **Destination:** Loki at `http://loki:3100/loki/api/v1/push`
+- **Configuration:** `alloy/config.alloy`
 
 #### Loki
 
@@ -248,7 +249,7 @@ start_endpoint (POST /start)
 | `api` | Custom (Python 3.12-slim) | 8000 | FastAPI application |
 | `mongodb` | `mongo:7` | 27017 | User data store |
 | `loki` | `grafana/loki:latest` | 3100 | Log aggregation |
-| `promtail` | `grafana/promtail:latest` | 9080 | Log scraping |
+| `alloy` | `grafana/alloy:latest` | - | Log scraping |
 | `grafana` | `grafana/grafana:latest` | 3000 | Visualization |
 
 **Network:** All services on `observability-network`.
@@ -282,7 +283,7 @@ Filters enrich LogRecord (user_id, trace context, error)
 JsonFormatter serializes to JSON on stdout/stderr
   │
   ▼
-Promtail scrapes Docker container logs
+Grafana Alloy scrapes Docker container logs
   │
   ▼
 Loki stores and indexes logs
@@ -303,6 +304,5 @@ Grafana queries Loki for visualization
 | No OTLP collector | No trace pipeline | `docker-compose.yml` |
 | `start_process()` has no span | Gap in trace hierarchy | `main.py:215` |
 | No MongoDB operation spans | DB calls not traced | `main.py:227` |
-| Promtail has no JSON parsing stages | Raw JSON lines stored, not field-indexed | `promtail-config.yml` |
 | Grafana has no Tempo datasource | Cannot visualize traces | `datasource.yml` |
 | No dashboard provisioning | Manual dashboard creation required | `grafana/provisioning/` |

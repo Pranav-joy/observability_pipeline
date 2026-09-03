@@ -6,7 +6,6 @@ python-multipart
 
 opentelemetry-api
 opentelemetry-sdk
-opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-httpx
 
 motor
