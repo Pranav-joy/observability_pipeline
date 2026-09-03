@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import traceback
+import uuid
 import jwt
 import uvicorn
 import httpx
@@ -17,11 +18,13 @@ from pythonjsonlogger import jsonlogger
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
 from opentelemetry.baggage import set_baggage, get_baggage
 from opentelemetry.context import attach
 
 
 app = FastAPI()
+
 
 trace.set_tracer_provider(TracerProvider())
 tracer = trace.get_tracer(__name__)
@@ -29,24 +32,26 @@ tracer = trace.get_tracer(__name__)
 HTTPXClientInstrumentor().instrument()
 
 
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception):
-    log("Unhandled exception", exc_info=sys.exc_info())
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+# --- Config ---
+
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-in-prod")
+ALGORITHM = "HS256"
+MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongodb:27017")
+DB_NAME = "observability"
+USERS_COLLECTION = "users"
+
+MOCK_USERS = [
+    {"user_id": "alice", "org_id": "acme"},
+    {"user_id": "bob", "org_id": "acme"},
+    {"user_id": "charlie", "org_id": "globex"},
+    {"user_id": "diana", "org_id": "globex"},
+]
+
+mongo_client: AsyncIOMotorClient = None
+db = None
 
 
-def log(event: str, exc_info=None, **kwargs):
-    current_span = trace.get_current_span()
-    span_context = current_span.get_span_context()
-    kwargs["trace_id"] = format(span_context.trace_id, "032x")
-    kwargs["span_id"] = format(span_context.span_id, "016x")
-    kwargs["user_id"] = get_baggage("user_id") or ""
-    kwargs["org_id"] = get_baggage("org_id") or ""
-    if exc_info:
-        logger.error(event, extra=kwargs, exc_info=exc_info)
-    else:
-        logger.info(event, extra=kwargs)
-
+# --- Logging ---
 
 class ErrorExtractionFilter(logging.Filter):
     def filter(self, record):
@@ -87,23 +92,47 @@ logger.propagate = False
 
 LOGGING_CONFIG = json.loads(open("logging_config.json").read())
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-change-in-prod")
-ALGORITHM = "HS256"
+
+def log(event: str, exc_info=None, **kwargs):
+    current_span = trace.get_current_span()
+    span_context = current_span.get_span_context()
+    kwargs.setdefault("trace_id", format(span_context.trace_id, "032x"))
+    kwargs.setdefault("span_id", format(span_context.span_id, "016x"))
+    kwargs.setdefault("user_id", get_baggage("user_id") or "")
+    kwargs.setdefault("org_id", get_baggage("org_id") or "")
+    if exc_info:
+        logger.error(event, extra=kwargs, exc_info=exc_info)
+    else:
+        logger.info(event, extra=kwargs)
+
+
+def log_span(span, span_name: str, **extra_attrs):
+    span_context = span.get_span_context()
+    attributes = {
+        "trace_id": format(span_context.trace_id, "032x"),
+        "user_id": get_baggage("user_id") or "",
+        "org_id": get_baggage("org_id") or "",
+    }
+    attributes.update(extra_attrs)
+
+    logger.info(
+        "span_completed",
+        extra={
+            "span_name": span_name,
+            "start_time": span.start_time / 1e9 if span.start_time else 0,
+            "end_time": span.end_time / 1e9 if span.end_time else 0,
+            "duration_ms": round(
+                ((span.end_time or 0) - (span.start_time or 0)) / 1e6, 2
+            ),
+            "span_status": str(span.status.status_code.name),
+            "attributes": attributes,
+        },
+    )
+
+
+# --- Auth ---
+
 security = HTTPBearer(auto_error=False)
-
-MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongodb:27017")
-DB_NAME = "observability"
-USERS_COLLECTION = "users"
-
-mongo_client: AsyncIOMotorClient = None
-db = None
-
-MOCK_USERS = [
-    {"user_id": "alice", "org_id": "acme"},
-    {"user_id": "bob", "org_id": "acme"},
-    {"user_id": "charlie", "org_id": "globex"},
-    {"user_id": "diana", "org_id": "globex"},
-]
 
 
 class SigninRequest(BaseModel):
@@ -147,46 +176,20 @@ async def require_auth(
     request.state.org_id = org_id
 
 
+# --- Middleware ---
+
 @app.middleware("http")
 async def tracing_middleware(request: Request, call_next):
-    ctx = trace.get_current_span().get_span_context()
-    with tracer.start_as_current_span(
-        f"{request.method} {request.url.path}",
-        context=ctx,
-    ) as span:
-        response = await call_next(request)
+    response = await call_next(request)
+    return response
 
-        user_id = get_baggage("user_id") or ""
-        org_id = get_baggage("org_id") or ""
-        form_record_id = get_baggage("form_record_id") or ""
 
-        if user_id:
-            span.set_attribute("user_id", user_id)
-        if org_id:
-            span.set_attribute("org_id", org_id)
-        if form_record_id:
-            span.set_attribute("form_record_id", form_record_id)
+# --- Startup ---
 
-        span.set_status(
-            trace.StatusCode.OK if response.status_code < 500
-            else trace.StatusCode.ERROR
-        )
-
-        log(
-            "span_completed",
-            span_name=f"{request.method} {request.url.path}",
-            start_time=span.start_time / 1e9 if span.start_time else 0,
-            end_time=time.time(),
-            duration_ms=round((time.time() - (span.start_time / 1e9)) * 1000, 2) if span.start_time else 0,
-            status_code=response.status_code,
-            span_status=str(span.status.status_code.name),
-            attributes=dict(span.attributes) if span.attributes else {},
-            events=[
-                {"name": e.name, "timestamp": e.timestamp / 1e9 if e.timestamp else 0}
-                for e in (span.events or [])
-            ],
-        )
-        return response
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    log("Unhandled exception", exc_info=(type(exc), exc, exc.__traceback__))
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 @app.on_event("startup")
@@ -200,6 +203,8 @@ async def startup_db():
         log("Seeded mock users into MongoDB")
 
 
+# --- Endpoints ---
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -207,50 +212,83 @@ async def health():
 
 @app.post("/signin")
 async def signin(body: SigninRequest):
-    user_id = body.user_id
-    org_id = body.org_id
-    user = await db[USERS_COLLECTION].find_one({"user_id": user_id, "org_id": org_id})
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid user_id or org_id")
+    with tracer.start_as_current_span("signin") as span:
+        user_id = body.user_id
+        org_id = body.org_id
 
-    token = jwt.encode(
-        {"user_id": user_id, "org_id": org_id}, SECRET_KEY, algorithm=ALGORITHM
-    )
-    log("POST /signin successful", user_id=user_id, org_id=org_id)
+        ctx = set_baggage("user_id", user_id)
+        ctx = set_baggage("org_id", org_id, context=ctx)
+        attach(ctx)
+
+        user = await db[USERS_COLLECTION].find_one({"user_id": user_id, "org_id": org_id})
+        if not user:
+            span.set_status(trace.StatusCode.ERROR)
+            log("POST /signin failed: user not found")
+            log_span(span, "signin")
+            raise HTTPException(status_code=401, detail="Invalid user_id or org_id")
+
+        token = jwt.encode(
+            {"user_id": user_id, "org_id": org_id}, SECRET_KEY, algorithm=ALGORITHM
+        )
+        span.set_status(trace.StatusCode.OK)
+        log("POST /signin successful")
+        log_span(span, "signin")
+
     return {"access_token": token, "token_type": "bearer"}
 
 
-@app.post("/form_A/{form_id}")
-async def form_A(form_id: str, request: Request, _auth=Depends(require_auth)):
-    log("POST /form_A received", form_id=form_id)
-    await asyncio.sleep(1)
-    ctx = set_baggage("form_record_id", form_id)
-    attach(ctx)
-    log("POST /form_A completed", form_id=form_id)
-    return {"status": "ok", "form_id": form_id}
+@app.post("/form_A")
+async def form_A(request: Request, _auth=Depends(require_auth)):
+    with tracer.start_as_current_span("form_A") as span:
+        form_id = "Form A"
+        form_record_id = str(uuid.uuid4())
+
+        ctx = set_baggage("form_record_id", form_record_id)
+        attach(ctx)
+
+        log("POST /form_A received")
+        await asyncio.sleep(1)
+
+        span.set_status(trace.StatusCode.OK)
+        log("POST /form_A completed")
+        log_span(span, "form_A", form_id=form_id, form_record_id=form_record_id)
+
+    return {"status": "ok", "form_id": form_id, "form_record_id": form_record_id}
 
 
-@app.post("/form_B/{form_id}")
-async def form_B(form_id: str, request: Request, _auth=Depends(require_auth)):
-    log("POST /form_B received", form_id=form_id)
-    await asyncio.sleep(1)
-    ctx = set_baggage("form_record_id", form_id)
-    attach(ctx)
-    log("POST /form_B completed", form_id=form_id)
-    return {"status": "ok", "form_id": form_id}
+@app.post("/form_B")
+async def form_B(request: Request, _auth=Depends(require_auth)):
+    with tracer.start_as_current_span("form_B") as span:
+        form_id = "Form B"
+        form_record_id = str(uuid.uuid4())
+
+        ctx = set_baggage("form_record_id", form_record_id)
+        attach(ctx)
+
+        log("POST /form_B received")
+        await asyncio.sleep(1)
+
+        raise ValueError("Simulated processing error in form_B")
 
 
 @app.post("/external")
 async def external(request: Request, _auth=Depends(require_auth)):
-    log("POST /external received")
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get("http://httpstat.us/500", timeout=5.0)
-        log("External API returned error", status_code=resp.status_code)
-        return {"status": "error", "upstream_status": resp.status_code}
-    except httpx.HTTPError as e:
-        log("External API call failed", exc_info=sys.exc_info())
-        raise HTTPException(status_code=502, detail="Upstream error")
+    with tracer.start_as_current_span("external") as span:
+        log("POST /external received")
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get("http://httpstat.us/500", timeout=5.0)
+            log("External API returned error", status_code=resp.status_code)
+            span.set_status(trace.StatusCode.ERROR)
+            span.add_event("upstream_error", {"status_code": resp.status_code})
+            log_span(span, "external")
+            return {"status": "error", "upstream_status": resp.status_code}
+        except httpx.HTTPError as e:
+            log("External API call failed", exc_info=sys.exc_info())
+            span.set_status(trace.StatusCode.ERROR)
+            span.add_event("upstream_exception", {"exception": str(e)})
+            log_span(span, "external")
+            raise HTTPException(status_code=502, detail="Upstream error")
 
 
 if __name__ == "__main__":
