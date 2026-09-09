@@ -184,7 +184,7 @@ def traced(span_name, skip_paths=None):
                         duration_ms = round((time.time() - span.start_time / 1e9) * 1000, 2)
                     else:
                         duration_ms = 0
-            log_span(span, name, duration_ms=duration_ms, trace_id=trace_id, span_id=span_id)
-            REQUEST_DURATION.labels(span_name=name).observe(duration_ms / 1000)
+                    log_span(span, name, duration_ms=duration_ms, trace_id=trace_id, span_id=span_id)
+                    REQUEST_DURATION.labels(span_name=name).observe(duration_ms / 1000)
         return wrapper
     return decorator
