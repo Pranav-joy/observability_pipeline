@@ -15,11 +15,25 @@ services:
       - "8000:8000"
     volumes:
       - ./app:/app/app
+    environment:
+      - LOKI_URL=http://loki:3100
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
     networks:
       - observability-network
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --log-config /app/logging_config.json
     depends_on:
       - mongodb
+      - tempo
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - observability-network
 
 
   loki:
@@ -32,13 +46,16 @@ services:
     networks:
       - observability-network
 
-  alloy:
-    image: grafana/alloy:latest
+  tempo:
+    image: grafana/tempo:latest
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+      - "4318:4318"
+    command: -config.file=/etc/tempo/tempo-config.yaml
     volumes:
-      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
-      - alloy-data:/var/lib/alloy/data
-      - /var/run/docker.sock:/var/run/docker.sock
-    command: run /etc/alloy/config.alloy --storage.path=/var/lib/alloy/data
+      - ./tempo/tempo-config.yml:/etc/tempo/tempo-config.yaml
+      - tempo-data:/var/tempo
     networks:
       - observability-network
 
@@ -56,7 +73,8 @@ services:
 
 volumes:
   mongo-data:
-  alloy-data:
+  tempo-data:
+  prometheus-data:
 
 networks:
   observability-network:

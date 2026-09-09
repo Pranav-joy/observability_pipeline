@@ -1,8 +1,9 @@
 {
     "version": 1,
     "disable_existing_loggers": false,
+    "root": {"handlers": [], "level": "WARNING", "propagate": false},
     "filters": {
-        "error_extraction": {"()": "main.ErrorExtractionFilter"}
+        "error_extraction": {"()": "tracing.ErrorExtractionFilter"}
     },
     "formatters": {
         "default": {
@@ -31,8 +32,9 @@
         }
     },
     "loggers": {
+        "app": {"handlers": ["default"], "level": "INFO", "propagate": false},
         "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": false},
         "uvicorn.error": {"level": "INFO"},
-        "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": false}
+        "uvicorn.access": {"handlers": ["access"], "level": "WARNING", "propagate": false}
     }
 }
