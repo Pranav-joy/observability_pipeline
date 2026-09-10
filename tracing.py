@@ -7,13 +7,17 @@ from functools import wraps
 from opentelemetry import trace
 from opentelemetry.baggage import get_baggage
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.processor.baggage import BaggageSpanProcessor, ALLOW_ALL_BAGGAGE_KEYS
 from pythonjsonlogger import jsonlogger
 from logging_loki import LokiHandler
 from prometheus_client import Counter, Histogram
 
+
 # --- Tracer ---
 
-trace.set_tracer_provider(TracerProvider())
+tracer_provider = TracerProvider()
+tracer_provider.add_span_processor(BaggageSpanProcessor(ALLOW_ALL_BAGGAGE_KEYS))
+trace.set_tracer_provider(tracer_provider)
 tracer = trace.get_tracer(__name__)
 
 # --- Prometheus Metrics ---
@@ -114,10 +118,8 @@ def log_span(span, span_name: str, logger=None, duration_ms=None, trace_id=None,
     if logger is None:
         logger = logging.getLogger("app")
 
-    attributes = {
-        "user_id": get_baggage("user_id") or "",
-        "org_id": get_baggage("org_id") or "",
-    }
+    HTTP_ATTRS = {"http.method", "http.url", "http.route", "http.status_code"}
+    attributes = {k: v for k, v in span.attributes.items() if k in HTTP_ATTRS} if hasattr(span, 'attributes') else {}
     attributes.update(extra_attrs)
 
     if duration_ms is None:
@@ -162,10 +164,11 @@ def traced(span_name, skip_paths=None):
 
             name = span_name(*args, **kwargs) if callable(span_name) else span_name
             with tracer.start_as_current_span(name) as span:
-                user_id = get_baggage("user_id") or ""
-                org_id = get_baggage("org_id") or ""
-                span.set_attribute("user_id", user_id)
-                span.set_attribute("org_id", org_id)
+                # BaggageSpanProcessor automatically adds baggage as span attributes
+                # user_id = get_baggage("user_id") or ""
+                # org_id = get_baggage("org_id") or ""
+                # span.set_attribute("user_id", user_id)
+                # span.set_attribute("org_id", org_id)
 
                 try:
                     result = await func(*args, **kwargs)
@@ -188,3 +191,4 @@ def traced(span_name, skip_paths=None):
                     REQUEST_DURATION.labels(span_name=name).observe(duration_ms / 1000)
         return wrapper
     return decorator
+

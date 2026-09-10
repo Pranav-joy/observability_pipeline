@@ -9,7 +9,9 @@ prometheus_client
 opentelemetry-api
 opentelemetry-sdk
 opentelemetry-instrumentation-httpx
+opentelemetry-instrumentation-fastapi
 opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-processor-baggage
 
 motor
 PyJWT

@@ -3,6 +3,7 @@ import json
 import os
 import random
 import sys
+import time
 import uuid
 import jwt
 import uvicorn
@@ -13,18 +14,19 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from opentelemetry import trace
-from opentelemetry.baggage import set_baggage
+from opentelemetry.baggage import set_baggage, get_baggage
 from opentelemetry.context import attach
 
-from tracing import setup, traced
+from tracing import setup, log_span
 import db as database
 
 
 app = FastAPI()
-
+FastAPIInstrumentor.instrument_app(app,excluded_urls="health,metrics")
 HTTPXClientInstrumentor().instrument()
 
 
@@ -103,24 +105,61 @@ async def require_auth(
 # --- Middleware ---
 
 @app.middleware("http")
-@traced("http_request", skip_paths=SKIP_TRACING)
 async def tracing_middleware(request: Request, call_next):
     span = trace.get_current_span()
     span.set_attribute("http.method", request.method)
     span.set_attribute("http.url", str(request.url))
     span.set_attribute("http.route", request.url.path)
-    try:        
+    try:
         response = await call_next(request)
         if span.is_recording():
+            user_id = get_baggage("user_id") or getattr(request.state, 'user_id', '') or ""
+            org_id = get_baggage("org_id") or getattr(request.state, 'org_id', '') or ""
+            form_id = get_baggage("form_id") or getattr(request.state, 'form_id', '') or ""
+            form_record_id = get_baggage("form_record_id") or getattr(request.state, 'form_record_id', '') or ""
+            span.set_attribute("user_id", user_id)
+            span.set_attribute("org_id", org_id)
+            span.set_attribute("form_id", form_id)
+            span.set_attribute("form_record_id", form_record_id)
             span.set_attribute("http.status_code", response.status_code)
+            if response.status_code >= 500:
+                span.set_status(trace.StatusCode.ERROR, f"HTTP {response.status_code}")
+            else:
+                span.set_status(trace.StatusCode.OK)
+            if user_id or org_id:
+                baggage_ctx = set_baggage("user_id", user_id)
+                baggage_ctx = set_baggage("org_id", org_id, context=baggage_ctx)
+                attach(baggage_ctx)
+            ctx = span.get_span_context()
+            duration_ms = round((time.time() - span.start_time / 1e9) * 1000, 2) if span.start_time else 0
+            log_span(span, f"{request.method} {request.url.path}",
+                     duration_ms=duration_ms,
+                     trace_id=format(ctx.trace_id, "032x"),
+                     span_id=format(ctx.span_id, "016x"))
         return response
-        
     except Exception as exc:
         if span.is_recording():
+            user_id = get_baggage("user_id") or getattr(request.state, 'user_id', '') or ""
+            org_id = get_baggage("org_id") or getattr(request.state, 'org_id', '') or ""
+            form_id = get_baggage("form_id") or getattr(request.state, 'form_id', '') or ""
+            form_record_id = get_baggage("form_record_id") or getattr(request.state, 'form_record_id', '') or ""
+            span.set_attribute("user_id", user_id)
+            span.set_attribute("org_id", org_id)
+            span.set_attribute("form_id", form_id)
+            span.set_attribute("form_record_id", form_record_id)
             span.record_exception(exc)
             span.set_status(trace.StatusCode.ERROR, str(exc))
+            if user_id or org_id:
+                baggage_ctx = set_baggage("user_id", user_id)
+                baggage_ctx = set_baggage("org_id", org_id, context=baggage_ctx)
+                attach(baggage_ctx)
+            ctx = span.get_span_context()
+            duration_ms = round((time.time() - span.start_time / 1e9) * 1000, 2) if span.start_time else 0
+            log_span(span, f"{request.method} {request.url.path}",
+                     duration_ms=duration_ms,
+                     trace_id=format(ctx.trace_id, "032x"),
+                     span_id=format(ctx.span_id, "016x"))
         raise exc
-    return response
 
 
 # --- Startup ---
@@ -156,14 +195,16 @@ async def metrics():
 
 
 @app.post("/signin")
-async def signin(body: SigninRequest):
+async def signin(request: Request, body: SigninRequest):
     user_id = body.user_id
     org_id = body.org_id
 
     ctx = set_baggage("user_id", user_id)
     ctx = set_baggage("org_id", org_id, context=ctx)
     attach(ctx)
-
+    request.state.user_id = user_id
+    request.state.org_id = org_id
+    logger.info("POST /signin received")
     user = await database.search_user(user_id, org_id)
     if not user:
         logger.info("POST /signin failed: user not found")
@@ -244,6 +285,7 @@ async def external(request: Request, _auth=Depends(require_auth)):
 
 @app.get("/dummy", include_in_schema=False)
 async def dummy():
+    logger.info("GET /dummy received")
     await delay(2)
     return {"status": "ok"}
  
