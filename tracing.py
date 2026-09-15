@@ -5,7 +5,8 @@ import traceback
 from functools import wraps
 
 from opentelemetry import trace
-from opentelemetry.baggage import get_baggage
+from opentelemetry.baggage import get_baggage, set_baggage
+from opentelemetry.context import attach
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.processor.baggage import BaggageSpanProcessor, ALLOW_ALL_BAGGAGE_KEYS
 from pythonjsonlogger import jsonlogger
@@ -56,20 +57,45 @@ class TraceContextFilter(logging.Filter):
 class ErrorExtractionFilter(logging.Filter):
     """Extracts error details into structured JSON for ERROR+ logs."""
 
+    @staticmethod
+    def _clean_trace(entries):
+        cleaned = []
+        for entry in entries:
+            lines = entry.split('\n')
+            filtered = [l for l in lines if not (l.strip() and all(c == '^' for c in l.strip()))]
+            cleaned.append('\n'.join(filtered).rstrip())
+        return cleaned
+
     def filter(self, record):
         if record.levelno >= logging.ERROR and record.exc_info:
             exc_type, exc_value, exc_tb = record.exc_info
             frames = traceback.extract_tb(exc_tb)
-            if frames:
+
+            app_frames = [f for f in frames if "/app/" in f.filename]
+            if app_frames:
+                location = f"{app_frames[-1].filename}:{app_frames[-1].lineno} in {app_frames[-1].name}"
+            elif frames:
                 last_frame = frames[-1]
                 location = f"{last_frame.filename}:{last_frame.lineno} in {last_frame.name}"
             else:
                 location = ""
+
+            message = str(exc_value) if exc_value else ""
+            if not message and exc_value and exc_value.__cause__:
+                message = str(exc_value.__cause__)
+            if hasattr(exc_value, 'request') and hasattr(exc_value.request, 'url'):
+                url = str(exc_value.request.url)
+                message = f"{message} (url={url})" if message else f"request to {url} failed"
+
+            full_trace = self._clean_trace(traceback.format_exception(exc_type, exc_value, exc_tb))
+            app_trace = self._clean_trace(traceback.format_list(app_frames) if app_frames else [])
+
             record.error = {
                 "type": exc_type.__name__ if exc_type else "",
-                "message": str(exc_value) if exc_value else "",
+                "message": message,
                 "location": location,
-                "stack_trace": "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+                "stack_trace": app_trace,
+                "stack_trace_full": full_trace,
             }
             record.exc_info = None
             record.exc_text = None
@@ -95,18 +121,15 @@ def setup(name="app", level=logging.INFO, propagate=False):
     if loki_url and not logger.handlers:
         loki_handler = LokiHandler(
             url=f"{loki_url}/loki/api/v1/push",
-            tags={"application": name, "service_name": "observability-api-1"},
+            tags={"service_name": "observability-api-1"},
             version="1",
         )
         loki_handler.setFormatter(formatter)
         logger.addHandler(loki_handler)
 
     has_trace_filter = any(isinstance(f, TraceContextFilter) for f in logger.filters)
-    has_error_filter = any(isinstance(f, ErrorExtractionFilter) for f in logger.filters)
     if not has_trace_filter:
         logger.addFilter(TraceContextFilter())
-    if not has_error_filter:
-        logger.addFilter(ErrorExtractionFilter())
 
     return logger
 
@@ -146,6 +169,28 @@ def log_span(span, span_name: str, logger=None, duration_ms=None, trace_id=None,
             "attributes": attributes,
         },
     )
+
+
+# --- Span enrichment ---
+
+BAGGAGE_FIELDS = ["user_id", "org_id", "form_id", "form_record_id"]
+
+def enrich_span_from_context(span, request):
+    """Reads baggage with request.state fallback, sets span attributes, re-attaches baggage."""
+    resolved = {}
+    for field in BAGGAGE_FIELDS:
+        value = get_baggage(field) or getattr(request.state, field, '') or ""
+        resolved[field] = value
+        if span.is_recording():
+            span.set_attribute(field, value)
+
+    if any(resolved.values()):
+        ctx = None
+        for k, v in resolved.items():
+            ctx = set_baggage(k, v, context=ctx)
+        attach(ctx)
+
+    return resolved
 
 
 # --- Decorator ---

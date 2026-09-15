@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the current observability pipeline implemented in the FastAPI prototype application. The pipeline covers structured JSON logging, OpenTelemetry tracing, and log aggregation via Grafana Alloy → Loki → Grafana.
+This document describes the current observability pipeline implemented in the FastAPI prototype application. The pipeline covers structured JSON logging, OpenTelemetry tracing with OTLP export, Prometheus metrics, and log aggregation via direct Loki push → Grafana.
 
 ---
 
@@ -12,8 +12,13 @@ This document describes the current observability pipeline implemented in the Fa
 ┌─────────────────────────────────────────────────────────────────┐
 │                       FastAPI Application                        │
 │                                                                  │
-│   ┌────────────┐    ┌────────────┐    ┌────────────┐           │
-│   │ function_a  │───▶│ function_b  │───▶│ function_c  │          │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │              Tracing Middleware (@traced)                │   │
+│   │   Creates root span per request, covers full lifecycle  │   │
+│   └─────────────────────────┬───────────────────────────────┘   │
+│                             │                                     │
+│   ┌────────────┐    ┌──────┴─────┐    ┌────────────┐           │
+│   │ form_A      │───▶│ function_b  │───▶│ function_c  │          │
 │   │  [span]     │    │  [span]     │    │  [span]     │          │
 │   └────────────┘    └─────┬──────┘    └────────────┘           │
 │                           │                                      │
@@ -24,33 +29,52 @@ This document describes the current observability pipeline implemented in the Fa
 │   │                   Logging Pipeline                      │    │
 │   │                                                         │    │
 │   │  LogRecord ──▶ Filters ──▶ JsonFormatter ──▶ StreamHandler│  │
-│   │                  │                                     │    │
-│   │          ┌───────┼───────────┐                         │    │
-│   │          ▼       ▼           ▼                         │    │
-│   │     UserIdFilter  TraceCtx  ErrorExtractFilter         │    │
-│   │     (ContextVar)  Filter    (exc_info → error dict)    │    │
-│   │                  (OTel span)                            │    │
+│   │                  │                   │                   │    │
+│   │          ┌───────┼───────────┐       │                   │    │
+│   │          ▼       ▼           ▼       ▼                   │    │
+│   │     TraceCtx  ErrorExtract  UserId  LokiHandler         │    │
+│   │     Filter    Filter        Filter  (direct push)       │    │
+│   │    (OTel span) (exc_info)   (ContextVar)                │    │
 │   └────────────────────────────────┬───────────────────────┘    │
 │                                    │                             │
-│                                    ▼                             │
-│                           JSON on stdout/stderr                  │
+│                          ┌─────────┴──────────┐                 │
+│                          ▼                    ▼                 │
+│                   stdout/stderr         Loki HTTP API           │
+│                   (console)            (direct push)            │
+│                                                                  │
+│   ┌────────────────────────────────────────────────────────┐    │
+│   │                   Traces Pipeline                       │    │
+│   │                                                         │    │
+│   │  OTel SDK ──▶ BatchSpanProcessor ──▶ OTLPSpanExporter  │    │
+│   └────────────────────────────┬───────────────────────────┘    │
+│                                │ gRPC                            │
+│                                ▼                                 │
+│                         Tempo (OTLP)                             │
+│                                                                  │
+│   ┌────────────────────────────────────────────────────────┐    │
+│   │                  Metrics Pipeline                       │    │
+│   │                                                         │    │
+│   │  prometheus_client ──▶ /metrics endpoint                │    │
+│   │  + @traced decorator records counters + histograms      │    │
+│   └────────────────────────────┬───────────────────────────┘    │
+│                                │ scrape                          │
+│                                ▼                                 │
+│                        Prometheus                                │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
-                               │  Docker container logs
-                               ▼
-                      ┌────────────────┐
-                      │  Grafana Alloy │  scrape via Docker socket
-                      └───────┬────────┘
-                              │  HTTP push
-                              ▼
-                      ┌────────────────┐
-                      │     Loki       │  TSDB + filesystem
-                      └───────┬────────┘
-                              │  query
-                              ▼
-                      ┌────────────────┐
-                      │    Grafana     │  Loki datasource (auto-provisioned)
-                      └────────────────┘
+                ┌──────────────┼──────────────┐
+                ▼              ▼              ▼
+        ┌────────────┐ ┌────────────┐ ┌────────────┐
+        │    Loki    │ │   Tempo    │ │ Prometheus │
+        │  (logs)    │ │ (traces)   │ │ (metrics)  │
+        └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
+              │              │              │
+              └──────────────┼──────────────┘
+                             ▼
+                      ┌────────────┐
+                      │  Grafana   │  auto-provisioned dashboards
+                      │  (port 3000)│
+                      └────────────┘
 ```
 
 ---
@@ -62,29 +86,32 @@ This document describes the current observability pipeline implemented in the Fa
 **Framework:** FastAPI with uvicorn ASGI server.
 
 **Key modules:**
-- `FastAPIInstrumentor` — auto-instruments incoming HTTP requests with spans
-- `HTTPXClientInstrumentor` — auto-instruments outgoing HTTPX requests with spans
-- `TracerProvider` — OpenTelemetry SDK tracer provider (default, in-process)
-- `tracer` — module-level tracer for manual span creation
+- Custom `tracing_middleware` — creates root span per request via `@traced` decorator
+- `@traced` decorator — manual span creation with Prometheus metrics recording
+- `TraceContextFilter` — auto-injects `trace_id`, `span_id`, `user_id`, `org_id`, `form_id`, `form_record_id` from OTel baggage
+- `ErrorExtractionFilter` — converts `exc_info` into structured error object with split stack traces
 
 **Endpoints:**
 
-| Endpoint | Method | Span Name | Description |
-|----------|--------|-----------|-------------|
-| `/signin` | POST | (none) | JWT authentication against MongoDB |
-| `/start` | POST | `start_endpoint` | Orchestrates function_a → function_b chain |
-| `/process` | POST | `process_endpoint` | Invokes function_c (always errors) |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/signin` | POST | JWT authentication against MongoDB, sets `user_id`/`org_id` in baggage |
+| `/start` | POST | Orchestrates form_A → function_b chain |
+| `/process` | POST | Invokes function_c (always errors) |
+| `/form_A` | POST | Form submission — inserts record to MongoDB |
+| `/form_B` | POST | Form submission — 50% random rejection before DB insert |
+| `/metrics` | GET | Prometheus metrics endpoint |
 
 **Internal functions:**
 
-| Function | Span Name | Description |
-|----------|-----------|-------------|
-| `function_a` | `function_a` | Simulates work (1s sleep) |
-| `function_b` | `function_b` | Simulates work, calls `/process` via HTTPX |
-| `function_c` | `function_c` | Simulates work, raises `ValueError` (test error) |
-| `start_process` | (none) | Orchestrator, calls function_a then function_b |
+| Function | Description |
+|----------|-------------|
+| `function_a` | Simulates work (1s sleep) |
+| `function_b` | Simulates work, calls `/process` via HTTPX |
+| `function_c` | Simulates work, raises `ValueError` (test error) |
+| `start_process` | Orchestrator, calls function_a then function_b |
 
-**Trace propagation:** OpenTelemetry context is propagated automatically via `FastAPIInstrumentor` (incoming) and `HTTPXClientInstrumentor` (outgoing). Manual spans use `tracer.start_as_current_span()`.
+**Trace propagation:** OTel context propagated via custom middleware. `enrich_span_from_context()` resolves baggage with `request.state` fallback.
 
 ---
 
@@ -92,29 +119,21 @@ This document describes the current observability pipeline implemented in the Fa
 
 **Formatter:** `pythonjsonlogger.jsonlogger.JsonFormatter`
 
-**Two logging pipelines exist:**
+**Console logging** is configured via `logging_config.json` (loaded by uvicorn's `--log-config`). The `setup()` function in `tracing.py` only handles:
+- Loki handler (when `LOKI_URL` is set)
+- Logger-level filters (`TraceContextFilter`)
 
-#### A. App Logger (code-configured)
+#### Logger Configuration
 
-Defined in `main.py` (lines 118–131):
+From `logging_config.json`:
 
-```
-handler = logging.StreamHandler()
-handler.setFormatter(formatter)
-handler.addFilter(UserIdFilter())
-handler.addFilter(ErrorExtractionFilter())
-```
+| Logger | Handler | Purpose |
+|--------|---------|---------|
+| `app` | `default` (stderr) + Loki | Application logs |
+| `uvicorn` | `default` (stderr) | Server logs |
+| `uvicorn.access` | `access` (stdout) | Request logs |
 
-Logger: `"app"`, level INFO, `propagate=False`.
-
-#### B. Uvicorn Loggers (dict-configured)
-
-Defined in `logging_config.json`, loaded at line 133, passed to uvicorn via `log_config`.
-
-Loggers configured:
-- `uvicorn` → `default` handler (stderr)
-- `uvicorn.error` → inherits from `uvicorn`
-- `uvicorn.access` → `access` handler (stdout)
+Root logger: `handlers: []`, `level: WARNING`, `propagate: false` — prevents duplicate console output.
 
 ---
 
@@ -124,19 +143,17 @@ Three custom filters enrich log records:
 
 | Filter | Source | Adds to Record | Purpose |
 |--------|--------|----------------|---------|
-| `UserIdFilter` | `main.py:80` | `user_id` | Reads `ContextVar` set by auth dependency |
-| `TraceContextFilter` | `main.py:109` | `trace_id`, `span_id` | Reads current OTel span context |
-| `ErrorExtractionFilter` | `main.py:86` | `error` (dict) | Converts `exc_info` into structured error object |
+| `TraceContextFilter` | `tracing.py` | `trace_id`, `span_id`, `user_id`, `org_id`, `form_id`, `form_record_id` | Reads current OTel span context + baggage |
+| `ErrorExtractionFilter` | `tracing.py` | `error` (dict) | Converts `exc_info` into structured error object |
+| `UserIdFilter` | (removed) | — | Superseded by `TraceContextFilter` baggage injection |
 
 **Filter wiring:**
 
-| Logger | UserIdFilter | TraceContextFilter | ErrorExtractionFilter |
-|--------|:------------:|:------------------:|:---------------------:|
-| `app` (code) | Yes | No* | Yes |
-| `uvicorn` (dict) | No | No | Yes |
-| `uvicorn.access` (dict) | No | No | Yes |
-
-> *The `app` logger compensates for the missing `TraceContextFilter` via the `log()` helper, which manually injects `trace_id`/`span_id` as `extra` kwargs.
+| Logger | TraceContextFilter | ErrorExtractionFilter |
+|--------|:------------------:|:---------------------:|
+| `app` (dict) | Yes (handler-level) | Yes (handler-level) |
+| `uvicorn` (dict) | No | Yes (handler-level) |
+| `uvicorn.access` (dict) | No | Yes (handler-level) |
 
 ---
 
@@ -150,12 +167,19 @@ Three custom filters enrich log records:
     "type": "ValueError",
     "message": "test error to verify error extraction",
     "location": "/app/main.py:191 in function_c",
-    "stack_trace": "Traceback (most recent call last):\n  ..."
+    "stack_trace": ["  File \"/app/main.py\", line 191, in function_c", "    raise ValueError(...)"],
+    "stack_trace_full": ["  File \"/app/main.py\", line 191, in function_c", "..."]
   }
 }
 ```
 
-The filter then clears `record.exc_info` and `record.exc_text` to prevent Python's default raw traceback output.
+**Key behaviors:**
+- `stack_trace` — app frames only (filtered to `/app/` paths), no library/venv noise
+- `stack_trace_full` — complete traceback (all frames)
+- Caret lines (`^^^^`) removed from both stack traces (Python 3.11+)
+- `location` — last app frame closest to exception origin
+- `message` — falls back to `__cause__` message if primary is empty; includes URL for httpx exceptions
+- Clears `record.exc_info` and `record.exc_text` to prevent Python's raw traceback output
 
 ---
 
@@ -168,11 +192,14 @@ Every application log produces a single-line JSON object:
   "timestamp": "2026-08-31T12:00:00.000Z",
   "level": "INFO",
   "name": "app",
-  "message": "function_c completed",
-  "request_id": "a1b2c3d4-...",
-  "user_id": "user1",
+  "message": "form_A completed",
   "trace_id": "0af7651916cd43dd8448eb211c80319c",
-  "span_id": "00f067aa0ba902b7"
+  "span_id": "00f067aa0ba902b7",
+  "user_id": "user1",
+  "org_id": "org1",
+  "form_id": "form_A",
+  "form_record_id": "abc123",
+  "error": null
 }
 ```
 
@@ -184,49 +211,53 @@ Every application log produces a single-line JSON object:
 | `level` | `levelname` renamed | Yes |
 | `name` | Logger name | Yes |
 | `message` | Log message | Yes |
-| `request_id` | Passed via `extra` in `log()` | Yes |
-| `user_id` | `UserIdFilter` via `ContextVar` | Yes (empty string if unset) |
-| `trace_id` | `TraceContextFilter` or `log()` | Yes (all zeros if no span) |
-| `span_id` | `TraceContextFilter` or `log()` | Yes (all zeros if no span) |
+| `trace_id` | `TraceContextFilter` from OTel span | Yes (all zeros if no span) |
+| `span_id` | `TraceContextFilter` from OTel span | Yes (all zeros if no span) |
+| `user_id` | `TraceContextFilter` from baggage | Yes (empty string if unset) |
+| `org_id` | `TraceContextFilter` from baggage | Yes (empty string if unset) |
+| `form_id` | `TraceContextFilter` from baggage | Yes (empty string if unset) |
+| `form_record_id` | `TraceContextFilter` from baggage | Yes (empty string if unset) |
 | `error` | `ErrorExtractionFilter` | Only on ERROR with exception |
-| `elapsed_s` | Passed via `extra` in `log()` | Only on specific endpoints |
 
 ---
 
 ### 6. OpenTelemetry Tracing
 
-**Provider:** `opentelemetry.sdk.trace.TracerProvider` (default, in-process only).
+**Provider:** `opentelemetry.sdk.trace.TracerProvider` with `Resource` (`service.name=observability-api-1`).
+
+**Exporter:** `OTLPSpanExporter` → Tempo at `http://tempo:4317` (when `OTEL_EXPORTER_OTLP_ENDPOINT` is set).
+
+**Processor:** `BatchSpanProcessor` — batches spans before export.
 
 **Instrumentation:**
-- `FastAPIInstrumentor.instrument_app(app)` — creates spans for each incoming HTTP request
+- Custom `tracing_middleware` — creates root span per request via `@traced("HTTP")`
 - `HTTPXClientInstrumentor().instrument()` — creates spans for outgoing HTTPX requests
 
 **Manual spans:**
+- `@traced` decorator records `app_requests_total` counter and `app_request_duration_seconds` histogram
 
+**Span hierarchy:**
 ```
-start_endpoint (POST /start)
-  ├── function_a
-  └── function_b
-        └── HTTP POST /process (auto-instrumented)
-              └── process_endpoint
-                    └── function_c
+HTTP (middleware root span)
+  ├── form_A / form_B
+  │     └── function_b
+  │           └── HTTP POST /process (auto-instrumented)
+  │                 └── function_c
+  └── /signin
 ```
 
-**Trace context propagation:** Handled automatically by OTel instrumentors via W3C Trace Context headers.
-
-**Current limitation:** No exporter is configured. Traces exist only in-process and are not sent to any backend.
+**Trace context propagation:** OTel context via W3C Trace Context headers. Baggage carries `user_id`, `org_id`, `form_id`, `form_record_id`. Middleware uses `enrich_span_from_context()` to resolve baggage with `request.state` fallback.
 
 ---
 
 ### 7. Log Aggregation Pipeline
 
-#### Grafana Alloy
+#### Direct Loki Push (App → Loki)
 
-- **Discovery:** Docker service discovery via `/var/run/docker.sock`
-- **Target:** All containers on the Docker host
-- **Labels:** `container` (derived from Docker container name)
+- **Mechanism:** `python-logging-loki` library, `LokiHandler` added to app logger
 - **Destination:** Loki at `http://loki:3100/loki/api/v1/push`
-- **Configuration:** `alloy/config.alloy`
+- **Triggered by:** `LOKI_URL` environment variable set
+- **Labels:** `service_name` (from OTel Resource)
 
 #### Loki
 
@@ -235,10 +266,39 @@ start_endpoint (POST /start)
 - **Index:** TSDB with schema v13, 24h period
 - **Ring:** In-memory (no clustering)
 
-#### Grafana
+---
 
-- **Datasource:** Loki, auto-provisioned via `datasource.yml`
-- **Access:** Proxy mode through Grafana backend
+### 8. Trace Backend (Tempo)
+
+- **Receiver:** OTLP gRPC on port 4317, HTTP on port 4318
+- **Storage:** Local filesystem
+- **Datasource:** Auto-provisioned in Grafana
+
+---
+
+### 9. Metrics Backend (Prometheus)
+
+- **Scrape:** Prometheus scrapes `/metrics` endpoint on the API service
+- **Metrics recorded:**
+  - `app_requests_total` (counter, labels: `span_name`, `status`)
+  - `app_request_duration_seconds` (histogram, label: `span_name`)
+- **Datasource:** Auto-provisioned in Grafana
+
+---
+
+### 10. Grafana Dashboard
+
+Auto-provisioned via `grafana/provisioning/dashboards/json/observability-api.json`:
+
+| Panel | Type | Description |
+|-------|------|-------------|
+| Log Volume | Timeseries bar chart | Log count over time |
+| Logs | Log stream | Live log stream with level filter, `wrapLogMessage: true` |
+| Traces | TraceQL search | Trace search panel |
+| Request Rate | Time series | Requests per second |
+| Request Duration | Time series | p50/p95 latency |
+
+**Datasources auto-provisioned:** Loki, Tempo, Prometheus
 
 ---
 
@@ -249,7 +309,8 @@ start_endpoint (POST /start)
 | `api` | Custom (Python 3.12-slim) | 8000 | FastAPI application |
 | `mongodb` | `mongo:7` | 27017 | User data store |
 | `loki` | `grafana/loki:latest` | 3100 | Log aggregation |
-| `alloy` | `grafana/alloy:latest` | - | Log scraping |
+| `tempo` | `grafana/tempo:latest` | 3200, 4317, 4318 | Trace backend |
+| `prometheus` | `prom/prometheus:latest` | 9090 | Metrics backend |
 | `grafana` | `grafana/grafana:latest` | 3000 | Visualization |
 
 **Network:** All services on `observability-network`.
@@ -262,35 +323,49 @@ start_endpoint (POST /start)
 Request arrives
   │
   ▼
-FastAPIInstrumentor creates root span
+tracing_middleware creates root span (@traced("HTTP"))
   │
   ▼
-Auth dependency sets user_id in ContextVar
+Auth dependency sets user_id in ContextVar + request.state
   │
   ▼
-Endpoint handler creates manual span
+Endpoint handler creates manual span, sets baggage
   │
   ▼
 Internal functions create child spans
   │
   ▼
-log() helper reads OTel context → injects trace_id + span_id
+enrich_span_from_context() resolves baggage → span attributes
   │
   ▼
-Filters enrich LogRecord (user_id, trace context, error)
+TraceContextFilter reads OTel span + baggage → injects into LogRecord
   │
   ▼
 JsonFormatter serializes to JSON on stdout/stderr
   │
   ▼
-Grafana Alloy scrapes Docker container logs
+LokiHandler pushes logs directly to Loki (when LOKI_URL set)
   │
   ▼
-Loki stores and indexes logs
+BatchSpanProcessor exports spans to Tempo via OTLP gRPC
   │
   ▼
-Grafana queries Loki for visualization
+Prometheus scrapes /metrics endpoint
+  │
+  ▼
+Grafana queries Loki + Tempo + Prometheus for visualization
 ```
+
+---
+
+## Environment Variables
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `LOKI_URL` | `http://loki:3100` | Loki endpoint for log export |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://tempo:4317` | Tempo endpoint for trace export |
+| `MONGO_URL` | `mongodb://mongodb:27017` | MongoDB connection |
+| `JWT_SECRET_KEY` | `dev-secret-change-in-prod` | JWT signing key |
 
 ---
 
@@ -298,11 +373,22 @@ Grafana queries Loki for visualization
 
 | Gap | Impact | Location |
 |-----|--------|----------|
-| `TraceContextFilter` not wired to app logger handler | Compensated by `log()` helper | `main.py:127` |
-| No OTLP exporter configured | Traces not exported to any backend | `main.py:38` |
-| No Tempo service | Traces not queryable in Grafana | `docker-compose.yml` |
-| No OTLP collector | No trace pipeline | `docker-compose.yml` |
-| `start_process()` has no span | Gap in trace hierarchy | `main.py:215` |
-| No MongoDB operation spans | DB calls not traced | `main.py:227` |
-| Grafana has no Tempo datasource | Cannot visualize traces | `datasource.yml` |
-| No dashboard provisioning | Manual dashboard creation required | `grafana/provisioning/` |
+| No DB operation spans | DB calls not traced | `db.py` |
+| No external API call spans | External calls not individually traced | `main.py` |
+| `ErrorExtractionFilter` can crash silently | Filter removes itself from logger for rest of session | `tracing.py` |
+| `start_process()` has no span | Gap in trace hierarchy | `main.py` |
+| LogQL nested field queries require `\| json` parser | Cannot use label matchers on `error.type` directly | Grafana queries |
+
+---
+
+## Key Decisions
+
+1. **Custom middleware over FastAPI instrumentor** — production code uses custom approach
+2. **Direct Loki push over Alloy** — simpler architecture, one less service
+3. **Traces first, metrics later** — incremental approach to full observability
+4. **dictConfig for console logging** — single source of truth, `setup()` only handles Loki + filters
+5. **Baggage-based log context** — `form_record_id`, `form_id` auto-injected via filter, no manual `extra={}`
+6. **request.state as baggage fallback** — OTel context doesn't propagate back from endpoint handlers to middleware in async FastAPI; `request.state` is immune to this
+7. **Split stack_trace into app-only + full** — `stack_trace` = filtered app frames for quick scanning; `stack_trace_full` = complete trace for deep debugging
+8. **Nested error object over flat fields** — keeps logs smaller; query via LogQL `| json | label_format` at query time
+9. **Single ErrorExtractionFilter on handlers** — avoids duplicate filter overwriting `record.error`

@@ -18,10 +18,10 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from opentelemetry import trace
-from opentelemetry.baggage import set_baggage, get_baggage
+from opentelemetry.baggage import set_baggage
 from opentelemetry.context import attach
 
-from tracing import setup, log_span
+from tracing import setup, log_span, enrich_span_from_context
 import db as database
 
 
@@ -113,23 +113,12 @@ async def tracing_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
         if span.is_recording():
-            user_id = get_baggage("user_id") or getattr(request.state, 'user_id', '') or ""
-            org_id = get_baggage("org_id") or getattr(request.state, 'org_id', '') or ""
-            form_id = get_baggage("form_id") or getattr(request.state, 'form_id', '') or ""
-            form_record_id = get_baggage("form_record_id") or getattr(request.state, 'form_record_id', '') or ""
-            span.set_attribute("user_id", user_id)
-            span.set_attribute("org_id", org_id)
-            span.set_attribute("form_id", form_id)
-            span.set_attribute("form_record_id", form_record_id)
+            enrich_span_from_context(span, request)
             span.set_attribute("http.status_code", response.status_code)
             if response.status_code >= 500:
                 span.set_status(trace.StatusCode.ERROR, f"HTTP {response.status_code}")
             else:
                 span.set_status(trace.StatusCode.OK)
-            if user_id or org_id:
-                baggage_ctx = set_baggage("user_id", user_id)
-                baggage_ctx = set_baggage("org_id", org_id, context=baggage_ctx)
-                attach(baggage_ctx)
             ctx = span.get_span_context()
             duration_ms = round((time.time() - span.start_time / 1e9) * 1000, 2) if span.start_time else 0
             log_span(span, f"{request.method} {request.url.path}",
@@ -139,20 +128,9 @@ async def tracing_middleware(request: Request, call_next):
         return response
     except Exception as exc:
         if span.is_recording():
-            user_id = get_baggage("user_id") or getattr(request.state, 'user_id', '') or ""
-            org_id = get_baggage("org_id") or getattr(request.state, 'org_id', '') or ""
-            form_id = get_baggage("form_id") or getattr(request.state, 'form_id', '') or ""
-            form_record_id = get_baggage("form_record_id") or getattr(request.state, 'form_record_id', '') or ""
-            span.set_attribute("user_id", user_id)
-            span.set_attribute("org_id", org_id)
-            span.set_attribute("form_id", form_id)
-            span.set_attribute("form_record_id", form_record_id)
+            enrich_span_from_context(span, request)
             span.record_exception(exc)
             span.set_status(trace.StatusCode.ERROR, str(exc))
-            if user_id or org_id:
-                baggage_ctx = set_baggage("user_id", user_id)
-                baggage_ctx = set_baggage("org_id", org_id, context=baggage_ctx)
-                attach(baggage_ctx)
             ctx = span.get_span_context()
             duration_ms = round((time.time() - span.start_time / 1e9) * 1000, 2) if span.start_time else 0
             log_span(span, f"{request.method} {request.url.path}",
@@ -226,6 +204,8 @@ async def form_A(request: Request, _auth=Depends(require_auth)):
     ctx = set_baggage("form_record_id", form_record_id)
     ctx = set_baggage("form_id", form_id, context=ctx)
     attach(ctx)
+    request.state.form_id = form_id
+    request.state.form_record_id = form_record_id
 
     logger.info("POST /form_A received")
     await asyncio.sleep(1)
@@ -249,6 +229,8 @@ async def form_B(request: Request, _auth=Depends(require_auth)):
     ctx = set_baggage("form_record_id", form_record_id)
     ctx = set_baggage("form_id", form_id, context=ctx)
     attach(ctx)
+    request.state.form_id = form_id
+    request.state.form_record_id = form_record_id
 
     logger.info("POST /form_B received")
 
@@ -257,7 +239,7 @@ async def form_B(request: Request, _auth=Depends(require_auth)):
         raise HTTPException(status_code=400, detail="Form B rejected")
 
     async with httpx.AsyncClient() as client:
-        resp = await client.get("http://127.0.0.1:8000/dummy", timeout=5.0)
+        resp = await client.get("http://192.0.2.1:9999/unreachable", timeout=2.0)
     logger.info("POST /form_B got /dummy response", extra={"status_code": resp.status_code})
 
     await delay(1)

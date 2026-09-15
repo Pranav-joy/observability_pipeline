@@ -1,6 +1,6 @@
 # Observability POC - Session Context
 
-## Date: 2026-09-08 (updated 2026-09-09)
+## Date: 2026-09-08 (updated 2026-09-11)
 
 ## What We Achieved
 
@@ -38,10 +38,11 @@
 - **Created**: `grafana/provisioning/dashboards/dashboard.yml` (provider config)
 - **Created**: `grafana/provisioning/dashboards/json/observability-api.json`
   - Log Volume panel (timeseries bar chart)
-  - Logs panel (live log stream with level filter)
+  - Logs panel (live log stream with level filter, `wrapLogMessage: true` for line-by-line view)
   - Traces panel (TraceQL search)
   - Query: `{service_name="observability-api-1"}`
 - **Dashboard auto-appears** on Grafana startup
+- **Note**: Logs panel wraps lines by default; Grafana Explore view requires manual toggle (bottom-left corner or `Ctrl+Shift+U`)
 
 ### 7. Tempo Trace Export (Full Instrumentation - Traces)
 - **Added**: `opentelemetry-exporter-otlp-proto-grpc` to requirements.txt
@@ -77,6 +78,102 @@
 - **Also**: Removed StreamHandler from `setup()` — console output now handled solely by `dictConfig`
 - **Result**: Single source of truth for console logging, no duplicates
 
+### 11. Parent Span Baggage Fix (request.state Fallback)
+- **Problem**: Parent span logs showed empty `user_id`, `org_id`, `form_id`, `form_record_id` despite baggage being set in endpoint handlers
+- **Root cause**: OTel context doesn't propagate back from endpoint handlers to middleware in async FastAPI. `get_baggage()` returns empty in middleware after `call_next()` for endpoints that set baggage internally (e.g., `/signin`, `/form_A`, `/form_B`)
+- **Fix**:
+  - Added `request.state.user_id` and `request.state.org_id` to `/signin` endpoint alongside baggage
+  - Added `request.state.form_id` and `request.state.form_record_id` to `/form_A` and `/form_B` endpoints
+  - Middleware falls back to `request.state` when `get_baggage()` returns empty
+  - Middleware re-attaches baggage context before `log_span()` so `TraceContextFilter` picks up values
+- **Why `request.state`?**: It's a plain attribute on the FastAPI `Request` object, passed by reference. No context propagation needed — immune to asyncio task boundary issues that affect OTel context variables.
+- **Files changed**: `main.py` (middleware + endpoints)
+
+### 12. enrich_span_from_context Helper
+- **Problem**: Middleware had ~20 lines of duplicated baggage resolution logic in both success and exception paths
+- **Solution**: Created `enrich_span_from_context(span, request)` helper in `tracing.py`
+- **What it does**:
+  1. Iterates over `BAGGAGE_FIELDS` (`user_id`, `org_id`, `form_id`, `form_record_id`)
+  2. For each field: `get_baggage(field) or getattr(request.state, field, '') or ""`
+  3. Sets resolved values as span attributes
+  4. Re-attaches baggage context for `TraceContextFilter`
+- **Middleware simplified**: Both success and exception paths now call `enrich_span_from_context(span, request)` — one line each
+- **Files changed**: `tracing.py` (new helper), `main.py` (middleware simplified, imports updated)
+
+### 13. ErrorExtractionFilter Duplicate Fix
+- **Problem**: `ErrorExtractionFilter` wasn't populating the `error` field in ERROR logs — output showed `"error": null`
+- **Root cause**: Two `ErrorExtractionFilter` instances running on the same `LogRecord`:
+  1. Logger-level filter (from `setup()` in `tracing.py`)
+  2. Handler-level filter (from `logging_config.json` on `"default"` and `"access"` handlers)
+- **Sequence**:
+  1. Logger-level filter runs → extracts error details into `record.error` → clears `record.exc_info = None`
+  2. Handler-level filter runs → sees `record.exc_info` is `None` → overwrites `record.error = null`
+- **Fix**: Removed `ErrorExtractionFilter` from `setup()` — only the handler-level filter from `logging_config.json` remains
+- **Result**: ERROR logs now show full error details:
+  ```json
+  "error": {
+    "type": "ServerSelectionTimeoutError",
+    "message": "mongodb:27017: [Errno -2] Name or service not known ...",
+    "location": "/app/db.py:32 in insert_form_record",
+    "stack_trace": "..."
+  }
+  ```
+- **Why keep handler-level?**: It covers all loggers (app, uvicorn, uvicorn.access) via `logging_config.json`, not just the app logger
+- **Files changed**: `tracing.py` (removed redundant filter from `setup()`)
+
+### 14. ErrorExtractionFilter Enhancement (location + message)
+- **Problem 1**: `location` field showed library code (e.g., `httpx/_transports/default.py`) instead of app code
+- **Fix 1**: Find last frame with `/app/` in path for `location` field (closest to exception origin); fallback to last frame if no app frames
+- **Problem 2**: `location` showed middleware frame instead of actual error source
+- **Fix 2**: Use `app_frames[-1]` (last app frame) instead of `app_frames[0]` (first app frame) — last frame is closest to where the exception actually happened
+- **Problem 3**: `message` field empty for httpx `ConnectTimeout` (exception raised without message string)
+- **Fix 3**: 
+  - Fall back to `__cause__` message if primary exception message is empty
+  - For httpx exceptions with `request.url`, include URL in message
+- **Before**:
+  ```json
+  "error": {
+    "type": "ConnectTimeout",
+    "message": "",
+    "location": "/app/main.py:140 in tracing_middleware"
+  }
+  ```
+- **After**:
+  ```json
+  "error": {
+    "type": "ConnectTimeout",
+    "message": "request to http://192.0.2.1:9999/unreachable failed",
+    "location": "/app/main.py:242 in form_B"
+  }
+  ```
+- **Files changed**: `tracing.py` (`ErrorExtractionFilter` class enhanced)
+
+### 15. Stack Trace Line-by-Line + Split Fields
+- **Problem**: `stack_trace` was a single joined string — all lines collapsed in Grafana logs
+- **Fix**: Changed `stack_trace` to a JSON array (one element per traceback line) instead of `"".join(...)`
+- **Also**: Split into two fields:
+  - `stack_trace` — app frames only (filtered to `/app/` paths), no library/venv noise
+  - `stack_trace_full` — complete traceback (original, all frames)
+- **Files changed**: `tracing.py` (`ErrorExtractionFilter.filter`)
+
+### 16. Caret (`^^^^`) Removal from Stack Traces
+- **Problem**: Python 3.11+ adds `^^^^^^^^^^^^^^^^` caret lines to tracebacks — noisy in logs
+- **Fix**: Created `_clean_trace()` static method on `ErrorExtractionFilter`
+  - Splits each formatted entry by `\n`, filters out lines that are all `^` characters
+  - Strips trailing `\n` from each entry
+- **Applied to**: Both `stack_trace` (app frames) and `stack_trace_full` (full trace)
+- **Files changed**: `tracing.py` (`ErrorExtractionFilter._clean_trace` static method)
+
+### 17. Querying Nested Error Fields in Loki (LogQL)
+- **Problem**: `error.type` is a nested JSON object — can't query directly with LogQL label matchers
+- **Decision**: Keep nested structure (smaller logs), use LogQL parser at query time
+- **Query pattern**:
+  ```logql
+  {service_name="observability-api-1"} | json | label_format error_type="{{error.type}}" | error_type="ConnectTimeout"
+  ```
+- **How it works**: `| json` flattens nested fields, `| label_format` extracts into queryable labels
+- **No code changes** — this is a Grafana/LogQL concern only
+
 ## Current Architecture
 
 ```
@@ -102,8 +199,8 @@ Grafana → Loki + Tempo + Prometheus (dashboards)
 ### Modified
 - `requirements.txt` - Added python-logging-loki, opentelemetry-exporter-otlp-proto-grpc, prometheus_client
 - `docker-compose.yml` - Removed alloy, added tempo + prometheus, added environment variables
-- `tracing.py` - Added LokiHandler, OTLP exporter, Resource, Prometheus metrics, form context in filter, removed StreamHandler
-- `main.py` - Added /metrics endpoint, form_id in baggage, removed extra={} from logs
+- `tracing.py` - Added LokiHandler, OTLP exporter, Resource, Prometheus metrics, form context in filter, removed StreamHandler, added `enrich_span_from_context` helper, removed duplicate ErrorExtractionFilter, split stack_trace into app-only + full, added `_clean_trace()` for caret removal
+- `main.py` - Added /metrics endpoint, form_id in baggage, removed extra={} from logs, added request.state fallback in middleware, simplified middleware with enrich_span_from_context, added request.state to /signin, /form_A, /form_B
 - `logging_config.json` - Added app logger, root logger config (duplicate fix), error_extraction filter
 - `grafana/provisioning/datasources/datasource.yml` - Added Tempo + Prometheus datasources
 - `grafana/provisioning/dashboards/json/observability-api.json` - Full dashboard with logs + traces + metrics
@@ -136,6 +233,17 @@ Grafana → Loki + Tempo + Prometheus (dashboards)
 - Can replace python-logging-loki when ready
 - Both achieve the same result (push logs to Loki HTTP API)
 
+### ErrorExtractionFilter Robustness Fixes
+- **Problem**: Filter can crash silently on edge cases, removing itself from the logger for the rest of the session
+- **Edge cases to fix**:
+  1. `exc_tb is None` → `traceback.extract_tb(None)` raises `TypeError`
+  2. `exc_value is None` → `exc_value.__cause__` raises `AttributeError`
+  3. `exc_value.request is None` → `exc_value.request.url` raises `AttributeError`
+- **Fix**: Guard all access with `if exc_tb`, `if exc_value`, `exc_value.request and hasattr(...)`
+- **Also**: Check `__context__` fallback (for exceptions raised during handling, not just `raise X from Y`)
+- **File**: `tracing.py` (`ErrorExtractionFilter` class)
+- **Priority**: High — silent filter removal breaks error extraction for all subsequent logs
+
 ## Key Decisions
 
 1. **Custom middleware over FastAPI instrumentor** - Production code uses custom approach
@@ -144,3 +252,8 @@ Grafana → Loki + Tempo + Prometheus (dashboards)
 4. **Infra + exporters scope** - Minimal app code changes, focus on backend setup
 5. **dictConfig for console logging** - Single source of truth, setup() only handles Loki + filters
 6. **Baggage-based log context** - form_record_id, form_id auto-injected via filter, no manual extra={}
+7. **request.state as baggage fallback** - OTel context doesn't propagate back from endpoint handlers to middleware in async FastAPI; request.state is immune to this
+8. **Single ErrorExtractionFilter on handlers** - Avoids duplicate filter overwriting record.error; handler-level filter covers all loggers
+9. **Split stack_trace into app-only + full** - `stack_trace` = filtered app frames for quick scanning; `stack_trace_full` = complete trace for deep debugging
+10. **Nested error object over flat fields** - Keeps logs smaller; query via LogQL `| json | label_format` at query time
+11. **wrapLogMessage already enabled** - Dashboard logs panel has `wrapLogMessage: true` — logs display line by line; Explore view needs manual toggle
