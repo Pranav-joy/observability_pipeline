@@ -174,6 +174,22 @@
 - **How it works**: `| json` flattens nested fields, `| label_format` extracts into queryable labels
 - **No code changes** — this is a Grafana/LogQL concern only
 
+### 18. ErrorExtractionFilter `exc_info` Requirement
+- **Problem**: `ErrorExtractionFilter` only activates when `record.exc_info` is truthy — but `logger.error()` does NOT set `exc_info` by default
+- **Root cause**: `exc_info` is only auto-set by `logger.exception()`. For `logger.error()`, `logger.warning()`, etc., you must pass `exc_info=True` explicitly
+- **Impact**: Without `exc_info=True`, the filter produces `"error": null` — exception details are silently lost
+- **Correct usage**:
+  ```python
+  # WRONG — filter won't fire, record.error will be null:
+  logger.error("request failed")
+
+  # RIGHT — one of these:
+  logger.error("request failed", exc_info=True)
+  logger.exception("request failed")  # same as exc_info=True
+  ```
+- **Note**: Every Python exception inherits from `BaseException` — custom exception classes work fine with the filter. The activation condition is `exc_info`, not exception type.
+- **Files changed**: `docs/SETUP.md` (troubleshooting section updated)
+
 ## Current Architecture
 
 ```

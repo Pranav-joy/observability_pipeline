@@ -69,7 +69,7 @@
             {
               "targetBlank": true,
               "title": "Dashboard (wrapped)",
-              "url": "/d/ad9rq6/internal-dashbard-wrapped?${__all_variables}"
+              "url": "/d/internal-dashboard-wrapped/internal-dashbard-wrapped?${__all_variables}"
             }
           ],
           "title": "New panel",

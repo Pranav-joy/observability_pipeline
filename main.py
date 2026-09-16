@@ -13,21 +13,18 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from opentelemetry import trace
 from opentelemetry.baggage import set_baggage
 from opentelemetry.context import attach
 
-from tracing import setup, log_span, enrich_span_from_context
+from tracing import setup, instrument_app, log_span, enrich_span_from_context
 import db as database
 
 
 app = FastAPI()
-FastAPIInstrumentor.instrument_app(app,excluded_urls="health,metrics")
-HTTPXClientInstrumentor().instrument()
+instrument_app(app)
 
 
 # --- Config ---
@@ -38,7 +35,6 @@ MONGO_URL = os.getenv("MONGO_URL", "mongodb://mongodb:27017")
 DB_NAME = "observability"
 USERS_COLLECTION = "users"
 
-SKIP_TRACING = {"/metrics", "/health"}
 
 MOCK_USERS = [
     {"user_id": "alice", "org_id": "acme"},

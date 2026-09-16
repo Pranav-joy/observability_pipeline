@@ -9,6 +9,8 @@ from opentelemetry.baggage import get_baggage, set_baggage
 from opentelemetry.context import attach
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.processor.baggage import BaggageSpanProcessor, ALLOW_ALL_BAGGAGE_KEYS
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from pythonjsonlogger import jsonlogger
 from logging_loki import LokiHandler
 from prometheus_client import Counter, Histogram
@@ -106,8 +108,15 @@ class ErrorExtractionFilter(logging.Filter):
 
 # --- Setup helper ---
 
+def instrument_app(app):
+    """Instrument a FastAPI app with OpenTelemetry, excluding health/metrics."""
+    FastAPIInstrumentor.instrument_app(app, excluded_urls="health,metrics")
+
+
 def setup(name="app", level=logging.INFO, propagate=False):
-    """Logger setup: Loki handler + filters only. Console output handled by dictConfig."""
+    """Logger setup: instrumentors + Loki handler + filters."""
+    HTTPXClientInstrumentor().instrument()
+
     formatter = jsonlogger.JsonFormatter(
         fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
         rename_fields={"levelname": "level", "asctime": "timestamp"},
