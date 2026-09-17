@@ -19,7 +19,7 @@ from opentelemetry import trace
 from opentelemetry.baggage import set_baggage
 from opentelemetry.context import attach
 
-from tracing import setup, instrument_app, log_span, enrich_span_from_context
+from tracing import setup, instrument_app, log_span, enrich_span_from_context, HTTP_REQUEST_COUNT, HTTP_REQUEST_DURATION, HTTP_REQUESTS_IN_PROGRESS
 import db as database
 
 
@@ -106,8 +106,16 @@ async def tracing_middleware(request: Request, call_next):
     span.set_attribute("http.method", request.method)
     span.set_attribute("http.url", str(request.url))
     span.set_attribute("http.route", request.url.path)
+    path = request.url.path
+    method = request.method
+    HTTP_REQUESTS_IN_PROGRESS.labels(method=method, path=path).inc()
+    start_time = time.time()
     try:
         response = await call_next(request)
+        duration = time.time() - start_time
+        status_code = str(response.status_code)
+        HTTP_REQUEST_COUNT.labels(method=method, path=path, status_code=status_code).inc()
+        HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
         if span.is_recording():
             enrich_span_from_context(span, request)
             span.set_attribute("http.status_code", response.status_code)
@@ -123,6 +131,9 @@ async def tracing_middleware(request: Request, call_next):
                      span_id=format(ctx.span_id, "016x"))
         return response
     except Exception as exc:
+        duration = time.time() - start_time
+        HTTP_REQUEST_COUNT.labels(method=method, path=path, status_code="500").inc()
+        HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
         if span.is_recording():
             enrich_span_from_context(span, request)
             span.record_exception(exc)
@@ -134,6 +145,8 @@ async def tracing_middleware(request: Request, call_next):
                      trace_id=format(ctx.trace_id, "032x"),
                      span_id=format(ctx.span_id, "016x"))
         raise exc
+    finally:
+        HTTP_REQUESTS_IN_PROGRESS.labels(method=method, path=path).dec()
 
 
 # --- Startup ---
