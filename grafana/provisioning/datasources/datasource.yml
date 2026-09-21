@@ -8,6 +8,13 @@ datasources:
     url: http://loki:3100
     uid: loki
     isDefault: true
+    jsonData:
+      derivedFields:
+        - datasourceUid: tempo
+          matcherType: label
+          matcherRegex: "trace_id"
+          name: TraceID
+          url: "$${__value.raw}"
 
   - name: Tempo
     type: tempo
@@ -15,6 +22,11 @@ datasources:
     url: http://tempo:3200
     uid: tempo
     isDefault: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        filterByTraceID: true
+        filterBySpanID: false
 
   - name: Prometheus
     type: prometheus

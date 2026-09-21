@@ -3,7 +3,6 @@ import os
 from functools import wraps
 
 from opentelemetry import trace, metrics
-from opentelemetry.baggage import get_baggage
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.metrics import MeterProvider
@@ -15,7 +14,7 @@ from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry._logs import set_logger_provider
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.processor.baggage import BaggageSpanProcessor, ALLOW_ALL_BAGGAGE_KEYS
+from opentelemetry.processor.baggage import BaggageSpanProcessor, BaggageLogProcessor, ALLOW_ALL_BAGGAGE_KEYS
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.pymongo import PymongoInstrumentor
 
@@ -34,6 +33,7 @@ def init_telemetry(service_name="observability-api-1"):
 
     logger_provider = LoggerProvider(resource=resource)
     logger_provider.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter(endpoint=otlp_endpoint, insecure=True)))
+    logger_provider.add_log_record_processor(BaggageLogProcessor(ALLOW_ALL_BAGGAGE_KEYS))
     set_logger_provider(logger_provider)
 
     otel_handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
@@ -44,7 +44,7 @@ def init_telemetry(service_name="observability-api-1"):
     metrics.set_meter_provider(meter_provider)
 
     HTTPXClientInstrumentor().instrument()
-    PymongoInstrumentor().instrument()
+    PymongoInstrumentor().instrument(capture_statement=True)
 
     return otel_handler
 
@@ -52,17 +52,6 @@ def init_telemetry(service_name="observability-api-1"):
 # --- Tracer ---
 
 tracer = trace.get_tracer(__name__)
-
-
-# --- Filters ---
-
-class TraceContextFilter(logging.Filter):
-    def filter(self, record):
-        record.user_id = get_baggage("user_id") or ""
-        record.org_id = get_baggage("org_id") or ""
-        record.form_record_id = get_baggage("form_record_id") or ""
-        record.form_id = get_baggage("form_id") or ""
-        return True
 
 
 # --- Baggage fields ---

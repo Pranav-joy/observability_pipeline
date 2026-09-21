@@ -208,6 +208,14 @@
             {
               "text": "org_id",
               "value": "org_id"
+            },
+            {
+              "text": "form_id",
+              "value": "form_id"
+            },
+            {
+              "text": "form_record_id",
+              "value": "form_record_id"
             }
           ],
           "description": "Query the Logs on attributes\n",

@@ -21,7 +21,7 @@ from opentelemetry.context import attach
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from tracing import (
-    init_telemetry, traced, TraceContextFilter,
+    init_telemetry, traced,
 )
 import db as database
 
@@ -38,9 +38,6 @@ logger.setLevel(logging.INFO)
 logger.propagate = False
 if not logger.handlers:
     logger.addHandler(otel_handler)
-has_trace_filter = any(isinstance(f, TraceContextFilter) for f in logger.filters)
-if not has_trace_filter:
-    logger.addFilter(TraceContextFilter())
 
 
 # --- Config ---
@@ -232,10 +229,11 @@ async def external(request: Request, _auth=Depends(require_auth)):
 
 @app.get("/dummy", include_in_schema=False)
 async def dummy():
+    ctx = set_baggage("dummy", "dummy")
+    attach(ctx)
     logger.info("GET /dummy received")
     await simulate_work(2)
     return {"status": "ok"}
-
 
 
 if __name__ == "__main__":
