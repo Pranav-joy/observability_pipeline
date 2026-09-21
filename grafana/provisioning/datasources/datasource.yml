@@ -6,6 +6,7 @@ datasources:
     type: loki
     access: proxy
     url: http://loki:3100
+    uid: loki
     isDefault: true
 
   - name: Tempo
@@ -21,3 +22,5 @@ datasources:
     url: http://prometheus:9090
     uid: prometheus
     isDefault: false
+    jsonData:
+      httpMethod: POST

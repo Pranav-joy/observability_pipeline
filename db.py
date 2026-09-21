@@ -1,8 +1,3 @@
-from opentelemetry import trace
-from tracing import traced
-
-tracer = trace.get_tracer(__name__)
-
 # These will be set on startup
 _db = None
 
@@ -12,22 +7,18 @@ def init_db(db):
     _db = db
 
 
-@traced("db.count_users")
 async def count_users():
     return await _db["users"].count_documents({})
 
 
-@traced("db.seed_users")
 async def seed_users(users):
     await _db["users"].insert_many(users)
 
 
-@traced("db.search_user")
 async def search_user(user_id, org_id):
     return await _db["users"].find_one({"user_id": user_id, "org_id": org_id})
 
 
-@traced("db.insert_form_record")
 async def insert_form_record(message, form_record_id, user_id):
     await _db["form_records"].insert_one({
         "message": message,

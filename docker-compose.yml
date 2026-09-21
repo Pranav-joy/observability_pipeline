@@ -16,14 +16,25 @@ services:
     volumes:
       - ./app:/app/app
     environment:
-      - LOKI_URL=http://loki:3100
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     networks:
       - observability-network
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --log-config /app/logging_config.json
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
     depends_on:
       - mongodb
+      - otel-collector
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "8889:8889"
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+    networks:
+      - observability-network
+    depends_on:
       - tempo
+      - loki
 
   prometheus:
     image: prom/prometheus:latest
@@ -69,7 +80,15 @@ services:
       - observability-network
     depends_on:
       - loki
-    
+
+  loadgen:
+    build: .
+    networks:
+      - observability-network
+    command: python loadgen.py
+    depends_on:
+      - api
+
 
 volumes:
   mongo-data:

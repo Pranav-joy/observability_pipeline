@@ -1,0 +1,84 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  resource_detection:
+    detectors: [env, system]
+    timeout: 5s
+
+  attributes/traces:
+    actions:
+      - key: deployment.environment
+        action: upsert
+        value: docker-compose
+
+  transform/logs:
+    log_statements:
+      - context: log
+        statements:
+          - set(log.attributes["otel.service.name"], resource.attributes["service.name"])
+
+exporters:
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: app
+    const_labels:
+      source: otel-collector
+
+connectors:
+  span_metrics:
+    histogram:
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s]
+    dimensions:
+      - name: http.method
+      - name: http.status_code
+      - name: http.route
+    aggregation_cardinality_limit: 1000
+    metrics_flush_interval: 15s
+
+service:
+  telemetry:
+    logs:
+      level: info
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource_detection, attributes/traces, batch]
+      exporters: [otlp_grpc/tempo, span_metrics]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource_detection, transform/logs, batch]
+      exporters: [otlp_http/loki]
+
+    metrics:
+      receivers: [otlp, span_metrics]
+      processors: [memory_limiter, resource_detection, batch]
+      exporters: [prometheus]

@@ -26,13 +26,13 @@
           "custom": {
             "axisBorderShow": false,
             "axisCenteredZero": false,
-            "axisLabel": "req/s",
+            "axisLabel": "requests",
             "lineWidth": 2,
             "fillOpacity": 15,
             "spanNulls": false,
             "stacking": { "mode": "none" }
           },
-          "unit": "reqps"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -44,8 +44,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (path) (rate(http_requests_total[5m]))",
-          "legendFormat": "{{path}}",
+          "expr": "sum by (http_target) (increase(app_http_server_duration_milliseconds_count[5m]))",
+          "legendFormat": "{{http_target}}",
           "refId": "A"
         }
       ]
@@ -75,8 +75,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (path) (rate(http_requests_total{status_code=~\"5..\"}[5m])) / sum by (path) (rate(http_requests_total[5m]))",
-          "legendFormat": "{{path}}",
+          "expr": "sum by (http_target) (increase(app_http_server_duration_milliseconds_count{http_status_code=~\"5..\"}[5m])) / sum by (http_target) (increase(app_http_server_duration_milliseconds_count[5m]))",
+          "legendFormat": "{{http_target}}",
           "refId": "A"
         }
       ]
@@ -88,13 +88,13 @@
           "color": { "mode": "palette-classic" },
           "custom": {
             "axisBorderShow": false,
-            "axisLabel": "seconds",
+            "axisLabel": "milliseconds",
             "lineWidth": 2,
             "fillOpacity": 10,
             "spanNulls": false,
             "stacking": { "mode": "none" }
           },
-          "unit": "s"
+          "unit": "ms"
         },
         "overrides": []
       },
@@ -106,19 +106,19 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(app_http_server_duration_milliseconds_bucket[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(app_http_server_duration_milliseconds_bucket[5m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(app_http_server_duration_milliseconds_bucket[5m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -149,8 +149,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (path) (http_requests_in_progress)",
-          "legendFormat": "{{path}}",
+          "expr": "sum by (http_target) (app_http_server_active_requests)",
+          "legendFormat": "{{http_target}}",
           "refId": "A"
         }
       ]
@@ -162,13 +162,13 @@
           "color": { "mode": "palette-classic" },
           "custom": {
             "axisBorderShow": false,
-            "axisLabel": "req/s",
+            "axisLabel": "requests",
             "lineWidth": 2,
             "fillOpacity": 15,
             "spanNulls": false,
             "stacking": { "mode": "none" }
           },
-          "unit": "reqps"
+          "unit": "short"
         },
         "overrides": []
       },
@@ -180,8 +180,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum by (method) (rate(http_requests_total[5m]))",
-          "legendFormat": "{{method}}",
+          "expr": "sum by (http_method) (increase(app_http_server_duration_milliseconds_count[5m]))",
+          "legendFormat": "{{http_method}}",
           "refId": "A"
         }
       ]
@@ -193,13 +193,13 @@
           "color": { "mode": "palette-classic" },
           "custom": {
             "axisBorderShow": false,
-            "axisLabel": "req/s",
+            "axisLabel": "milliseconds",
             "lineWidth": 2,
             "fillOpacity": 15,
             "spanNulls": false,
             "stacking": { "mode": "none" }
           },
-          "unit": "reqps"
+          "unit": "ms"
         },
         "overrides": []
       },
@@ -211,20 +211,144 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (path, le) (rate(http_request_duration_seconds_bucket[5m])))",
-          "legendFormat": "{{path}}",
+          "expr": "histogram_quantile(0.95, sum by (http_target, le) (rate(app_http_server_duration_milliseconds_bucket[5m])))",
+          "legendFormat": "{{http_target}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisLabel": "calls",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "spanNulls": false,
+            "stacking": { "mode": "none" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 7,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "DB Calls by Operation",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (span_name) (increase(app_app_requests_total[5m]))",
+          "legendFormat": "{{span_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisLabel": "milliseconds",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": { "mode": "none" }
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "id": 8,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "DB Call Duration by Operation (p95)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (operation, le) (rate(app_db_query_duration_bucket[5m])))",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisLabel": "%",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "spanNulls": false,
+            "stacking": { "mode": "none" }
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "id": 9,
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "DB Call Error Rate by Operation",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (span_name) (increase(app_app_requests_total{status=\"error\"}[5m])) / sum by (span_name) (increase(app_app_requests_total[5m]))",
+          "legendFormat": "{{span_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "orange" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisLabel": "ratio",
+            "lineWidth": 3,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": { "mode": "none" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "id": 10,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "DB Calls per HTTP Request",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(app_app_requests_total[5m])) / sum(increase(app_http_server_duration_milliseconds_count{http_target!~\"/metrics|/health\"}[5m]))",
+          "legendFormat": "db_calls / http_requests",
           "refId": "A"
         }
       ]
     }
   ],
   "schemaVersion": 39,
-  "tags": ["http", "metrics"],
+  "tags": ["http", "metrics", "database"],
   "templating": { "list": [] },
   "time": { "from": "now-30m", "to": "now" },
   "timepicker": {},
   "timezone": "",
   "title": "HTTP Metrics",
   "uid": "http-metrics",
-  "version": 1
+  "version": 4
 }

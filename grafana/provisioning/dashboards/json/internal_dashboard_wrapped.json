@@ -168,7 +168,8 @@
     "variables": [
       {
         "datasource": {
-          "name": "P8E80F9AEF21F6940"
+          "name": "Loki",
+          "uid": "loki"
         },
         "group": "loki",
         "kind": "AdhocVariable",

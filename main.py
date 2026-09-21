@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import json
 import os
 import random
@@ -9,22 +10,37 @@ import jwt
 import uvicorn
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from opentelemetry import trace
 from opentelemetry.baggage import set_baggage
 from opentelemetry.context import attach
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-from tracing import setup, instrument_app, log_span, enrich_span_from_context, HTTP_REQUEST_COUNT, HTTP_REQUEST_DURATION, HTTP_REQUESTS_IN_PROGRESS
+from tracing import (
+    init_telemetry, traced, TraceContextFilter,
+)
 import db as database
 
 
 app = FastAPI()
-instrument_app(app)
+
+# --- Logging ---
+
+otel_handler = init_telemetry()
+FastAPIInstrumentor.instrument_app(app, excluded_urls="health,metrics")
+
+logger = logging.getLogger("app")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+if not logger.handlers:
+    logger.addHandler(otel_handler)
+has_trace_filter = any(isinstance(f, TraceContextFilter) for f in logger.filters)
+if not has_trace_filter:
+    logger.addFilter(TraceContextFilter())
 
 
 # --- Config ---
@@ -45,11 +61,6 @@ MOCK_USERS = [
 
 mongo_client: AsyncIOMotorClient = None
 db = None
-# --- Logging ---
-
-logger = setup()
-
-LOGGING_CONFIG = json.loads(open("logging_config.json").read())
 
 
 # --- Auth ---
@@ -98,57 +109,6 @@ async def require_auth(
     request.state.org_id = org_id
 
 
-# --- Middleware ---
-
-@app.middleware("http")
-async def tracing_middleware(request: Request, call_next):
-    span = trace.get_current_span()
-    span.set_attribute("http.method", request.method)
-    span.set_attribute("http.url", str(request.url))
-    span.set_attribute("http.route", request.url.path)
-    path = request.url.path
-    method = request.method
-    HTTP_REQUESTS_IN_PROGRESS.labels(method=method, path=path).inc()
-    start_time = time.time()
-    try:
-        response = await call_next(request)
-        duration = time.time() - start_time
-        status_code = str(response.status_code)
-        HTTP_REQUEST_COUNT.labels(method=method, path=path, status_code=status_code).inc()
-        HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
-        if span.is_recording():
-            enrich_span_from_context(span, request)
-            span.set_attribute("http.status_code", response.status_code)
-            if response.status_code >= 500:
-                span.set_status(trace.StatusCode.ERROR, f"HTTP {response.status_code}")
-            else:
-                span.set_status(trace.StatusCode.OK)
-            ctx = span.get_span_context()
-            duration_ms = round((time.time() - span.start_time / 1e9) * 1000, 2) if span.start_time else 0
-            log_span(span, f"{request.method} {request.url.path}",
-                     duration_ms=duration_ms,
-                     trace_id=format(ctx.trace_id, "032x"),
-                     span_id=format(ctx.span_id, "016x"))
-        return response
-    except Exception as exc:
-        duration = time.time() - start_time
-        HTTP_REQUEST_COUNT.labels(method=method, path=path, status_code="500").inc()
-        HTTP_REQUEST_DURATION.labels(method=method, path=path).observe(duration)
-        if span.is_recording():
-            enrich_span_from_context(span, request)
-            span.record_exception(exc)
-            span.set_status(trace.StatusCode.ERROR, str(exc))
-            ctx = span.get_span_context()
-            duration_ms = round((time.time() - span.start_time / 1e9) * 1000, 2) if span.start_time else 0
-            log_span(span, f"{request.method} {request.url.path}",
-                     duration_ms=duration_ms,
-                     trace_id=format(ctx.trace_id, "032x"),
-                     span_id=format(ctx.span_id, "016x"))
-        raise exc
-    finally:
-        HTTP_REQUESTS_IN_PROGRESS.labels(method=method, path=path).dec()
-
-
 # --- Startup ---
 
 @app.exception_handler(Exception)
@@ -174,11 +134,6 @@ async def startup_db():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-
-@app.get("/metrics")
-async def metrics():
-    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/signin")
@@ -217,7 +172,7 @@ async def form_A(request: Request, _auth=Depends(require_auth)):
     request.state.form_record_id = form_record_id
 
     logger.info("POST /form_A received")
-    await asyncio.sleep(1)
+    await simulate_work(1)
 
     await database.insert_form_record("Hi data form recorded", form_record_id, request.state.user_id)
 
@@ -226,8 +181,11 @@ async def form_A(request: Request, _auth=Depends(require_auth)):
     return {"status": "ok", "form_id": form_id, "form_record_id": form_record_id}
 
 
-async def delay(seconds):
+@traced("simulate_work")
+async def simulate_work(seconds):
+    logger.info("simulate_work started", extra={"seconds": seconds})
     await asyncio.sleep(seconds)
+    logger.info("simulate_work done")
 
 
 @app.post("/form_B")
@@ -251,14 +209,12 @@ async def form_B(request: Request, _auth=Depends(require_auth)):
         resp = await client.get("http://192.0.2.1:9999/unreachable", timeout=2.0)
     logger.info("POST /form_B got /dummy response", extra={"status_code": resp.status_code})
 
-    await delay(1)
+    await simulate_work(1)
 
     await database.insert_form_record("Hi data form recorded", form_record_id, request.state.user_id)
 
     logger.info("POST /form_B completed")
     return {"status": "ok", "form_id": form_id, "form_record_id": form_record_id}
-    
-        
 
 
 @app.post("/external")
@@ -277,9 +233,10 @@ async def external(request: Request, _auth=Depends(require_auth)):
 @app.get("/dummy", include_in_schema=False)
 async def dummy():
     logger.info("GET /dummy received")
-    await delay(2)
+    await simulate_work(2)
     return {"status": "ok"}
- 
+
+
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True, log_config=LOGGING_CONFIG)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

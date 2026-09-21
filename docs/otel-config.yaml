@@ -1,0 +1,42 @@
+# OpenTelemetry declarative configuration (file_format 1.0).
+# Loaded by configure_telemetry() via opentelemetry.configuration.
+
+file_format: "1.0"
+
+resource:
+  attributes:
+    - name: service.name
+      value: ${OTEL_SERVICE_NAME:-observability-sample}
+
+propagator:
+  composite:
+    - tracecontext: {}
+    - baggage: {}
+
+tracer_provider:
+  sampler:
+    parent_based:
+      root:
+        always_on: {}
+  processors:
+    - batch:
+        exporter:
+          otlp_http:
+            endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4318/v1/traces}
+
+meter_provider:
+  readers:
+    - periodic:
+        interval: 5000
+        exporter:
+          console: {}
+
+logger_provider:
+  processors:
+    - batch:
+        exporter:
+          otlp_http:
+            endpoint: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:-http://localhost:3100/otlp/v1/logs}
+    - simple:
+        exporter:
+          console: {}
