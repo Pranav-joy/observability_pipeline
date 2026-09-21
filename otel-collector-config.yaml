@@ -32,6 +32,7 @@ processors:
       - context: log
         statements:
           - set(log.attributes["otel.service.name"], resource.attributes["service.name"])
+          - 'set(body, Concat(["{\"message\":\"", String(body), "\",\"user_id\":\"", String(attributes["user_id"]), "\",\"org_id\":\"", String(attributes["org_id"]), "\",\"form_id\":\"", String(attributes["form_id"]), "\",\"form_record_id\":\"", String(attributes["form_record_id"]), "\"}"], ""))'
 
 exporters:
   otlp_grpc/tempo:
