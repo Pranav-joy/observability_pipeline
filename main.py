@@ -9,6 +9,8 @@ import uuid
 import jwt
 import uvicorn
 import httpx
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -38,6 +40,35 @@ logger.setLevel(logging.INFO)
 logger.propagate = False
 if not logger.handlers:
     logger.addHandler(otel_handler)
+
+
+# --- Middleware ---
+
+BAGGAGE_FIELDS = set(json.loads(os.getenv("BAGGAGE_FIELDS")))
+
+
+@app.middleware("http")
+async def baggage_middleware(request: Request, call_next):
+    body = await request.body()
+    request._body = body
+    if body:
+        try:
+            data = json.loads(body)
+            if isinstance(data, dict):
+                ctx = None
+                for key, value in data.items():
+                    if key in BAGGAGE_FIELDS:
+                        # In production, body will contain: form_id, form_record_id, etc.
+                        # e.g. form_id=body.form_id
+                        if ctx is None:
+                            ctx = set_baggage(key, str(value))
+                        else:
+                            ctx = set_baggage(key, str(value), context=ctx)
+                if ctx:
+                    attach(ctx)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+    return await call_next(request)
 
 
 # --- Config ---
@@ -169,7 +200,11 @@ async def form_A(request: Request, _auth=Depends(require_auth)):
     request.state.form_record_id = form_record_id
 
     logger.info("POST /form_A received")
-    await simulate_work(1)
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get("http://localhost:8000/dummy", timeout=5.0)
+    logger.info("POST /form_A got /dummy response", extra={"status_code": resp.status_code})
+
 
     await database.insert_form_record("Hi data form recorded", form_record_id, request.state.user_id)
 
