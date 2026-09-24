@@ -1,14 +1,30 @@
 import json
+import os
 import random
 import time
 import sys
 
 import httpx
 
-API_URL = "http://api:8000"
+API_URL = os.getenv("API_URL", "http://api:8000")
 
 with open("users.json") as f:
     USERS = json.load(f)
+
+
+def wait_for_api(client, retries=30, delay=2.0):
+    for i in range(retries):
+        try:
+            resp = client.get(f"{API_URL}/health", timeout=2.0)
+            if resp.status_code == 200:
+                print(f"API ready at {API_URL}")
+                sys.stdout.flush()
+                return True
+        except Exception as e:
+            print(f"waiting for API ({i + 1}/{retries}): {e}")
+            sys.stdout.flush()
+        time.sleep(delay)
+    return False
 
 
 def signin(client, user):
@@ -49,6 +65,11 @@ def main():
     sys.stdout.flush()
 
     with httpx.Client(timeout=10.0) as client:
+        if not wait_for_api(client):
+            print("API never became ready, exiting")
+            sys.stdout.flush()
+            sys.exit(1)
+
         while True:
             user = random.choice(USERS)
             try:

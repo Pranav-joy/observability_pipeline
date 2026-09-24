@@ -19,7 +19,7 @@ processors:
 
   resource_detection:
     detectors: [env, system]
-    timeout: 5s
+    timeout: 5 
 
   attributes/traces:
     actions:
@@ -36,12 +36,12 @@ processors:
 
 exporters:
   otlp_grpc/tempo:
-    endpoint: tempo:4317
+    endpoint: ${env:TEMPO_ENDPOINT}
     tls:
       insecure: true
 
   otlp_http/loki:
-    endpoint: http://loki:3100/otlp
+    endpoint: ${env:LOKI_OTLP_ENDPOINT}
     tls:
       insecure: true
 

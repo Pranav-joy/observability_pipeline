@@ -1,6 +1,8 @@
 # Observability POC - Session Context
 
-## Date: 2026-09-08 (updated 2026-09-11)
+## Date: 2026-09-08 (updated 2026-09-24)
+
+> **Note:** Sections 1–18 describe historical evolution of the POC. Some named pieces (e.g. `TraceContextFilter`, `ErrorExtractionFilter`, `logging_config.json`, direct `LokiHandler` push, custom tracing middleware) were later removed or replaced. **Current code state is described under “Current Architecture” and section 19 below.**
 
 ## What We Achieved
 
@@ -190,51 +192,100 @@
 - **Note**: Every Python exception inherits from `BaseException` — custom exception classes work fine with the filter. The activation condition is `exc_info`, not exception type.
 - **Files changed**: `docs/SETUP.md` (troubleshooting section updated)
 
+### 19. Baggage Lost on Unhandled Exception (Fix)
+- **Problem**: On `/form_B` → httpx `ConnectTimeout` to `192.0.2.1:9999/unreachable`, the error log showed `user_id`, `org_id`, `form_id`, `form_record_id` as `<nil>` / empty while `trace_id` was still correct
+- **Reproduced in Loki**:
+  ```json
+  {"message":"Unhandled exception","user_id":"<nil>","org_id":"<nil>","form_id":"<nil>","form_record_id":"<nil>"}
+  ```
+  vs earlier success/info logs on the same `trace_id` which had full baggage
+- **Root cause**:
+  - Baggage lives in OTel `contextvars` via `set_baggage` + `attach()` inside `require_auth` / endpoint
+  - `form_B` had **no try/except** around the httpx call → exception bubbled to the single global `@app.exception_handler(Exception)`
+  - By the time that handler runs, contextvars baggage is no longer in scope (async/task boundary — same class of issue as §11)
+  - Handler called `logger.error(...)` **without** rebuilding baggage → `BaggageLogProcessor` saw empty context → body fields became `<nil>`
+  - `trace_id` survived because the request **span** is still current (span context ≠ baggage layer)
+- **Why only unhandled exceptions?**: Normal logs and caught errors (e.g. `/external` `except httpx.HTTPError: logger.error(...)` inside the endpoint) still run while baggage is attached
+- **Fix (dual-write + safety net)**:
+  1. **`baggage_middleware`**: body-derived baggage keys also written to `request.state` (durable copy)
+  2. **`rebuild_baggage_from_request(request, fields=None)`** in `tracing.py`: for each field, `get_baggage(key) or request.state` → `set_baggage` → `attach()` so current context has baggage again
+  3. **`unhandled_exception_handler`**: call `rebuild_baggage_from_request(request, fields=BAGGAGE_FIELDS)` **before** `logger.error(...)`
+  4. **`/form_B`**: wrap httpx call in `try/except httpx.HTTPError` → `logger.error(..., exc_info=sys.exc_info())` **inside the endpoint** (baggage still live) → `HTTPException(502)` — matches `/external`, proper status code, fewer errors reach the global handler
+- **Verified**: `/form_B` → HTTP 502; Loki error log:
+  ```json
+  {"message":"Upstream call failed","user_id":"alice","org_id":"acme","form_id":"Form B","form_record_id":"..."}
+  ```
+- **Mental model**: baggage = contextvars (lost at exception-handler boundary); `request.state` = plain object on Request (survives); fix = bridge `request.state` → `set_baggage` → `attach` → log
+- **Files changed**: `main.py` (middleware `setattr`, exception handler, form_B try/except), `tracing.py` (`rebuild_baggage_from_request`, baggage imports)
+
 ## Current Architecture
 
 ```
-App ──OTLP──→ Tempo (traces)
-App ──HTTP──→ Loki (logs)
-App ──/metrics──→ Prometheus (metrics)
+App ──OTLP/gRPC──→ otel-collector ──OTLP──→ Tempo (traces)
+                              └──OTLP──→ Loki (logs; body rewritten with baggage fields)
+App ──/metrics──→ Prometheus (metrics)   [via collector prometheus exporter :8889]
 Grafana → Loki + Tempo + Prometheus (dashboards)
 ```
 
-## Services (docker-compose up)
+**Current instrumentation (code as of 2026-09-24):**
+- `FastAPIInstrumentor.instrument_app` — request spans
+- `HTTPXClientInstrumentor` / `PymongoInstrumentor` — outbound spans
+- `BaggageSpanProcessor` / `BaggageLogProcessor` — copy context baggage → span/log attributes
+- `LoggingHandler` (OTLP) — app logs → collector → Loki (no `LokiHandler` / `python-logging-loki` path in current `tracing.py`)
+- otel-collector `transform/logs` — embeds `user_id`, `org_id`, `form_id`, `form_record_id` into log **body** JSON
+- No `TraceContextFilter` / `ErrorExtractionFilter` / `logging_config.json` / custom `tracing_middleware` in current code
+
+## Services (docker compose)
+
+Start with env file (no root `.env` in repo):
+
+```bash
+docker compose --env-file .env.uat up -d --build api
+```
 
 | Service | Port | Purpose |
 |---------|------|---------|
 | api | 8000 | FastAPI app |
 | mongodb | 27017 | Database |
+| otel-collector | 4317/4318 (internal), 8889 | OTLP in, metrics out |
 | loki | 3100 | Log aggregation |
 | tempo | 3200, 4317, 4318 | Trace backend |
 | prometheus | 9090 | Metrics backend |
 | grafana | 3000 | Dashboard UI |
+| loadgen | — | Traffic generator |
 
 ## Files Modified/Created
 
 ### Modified
-- `requirements.txt` - Added python-logging-loki, opentelemetry-exporter-otlp-proto-grpc, prometheus_client
-- `docker-compose.yml` - Removed alloy, added tempo + prometheus, added environment variables
-- `tracing.py` - Added LokiHandler, OTLP exporter, Resource, Prometheus metrics, form context in filter, removed StreamHandler, added `enrich_span_from_context` helper, removed duplicate ErrorExtractionFilter, split stack_trace into app-only + full, added `_clean_trace()` for caret removal
-- `main.py` - Added /metrics endpoint, form_id in baggage, removed extra={} from logs, added request.state fallback in middleware, simplified middleware with enrich_span_from_context, added request.state to /signin, /form_A, /form_B
-- `logging_config.json` - Added app logger, root logger config (duplicate fix), error_extraction filter
-- `grafana/provisioning/datasources/datasource.yml` - Added Tempo + Prometheus datasources
-- `grafana/provisioning/dashboards/json/observability-api.json` - Full dashboard with logs + traces + metrics
+- `requirements.txt` - OTel SDK/exporters/instrumentations, motor, PyJWT, etc. (no `python-logging-loki` in current requirements)
+- `docker-compose.yml` - api, mongodb, otel-collector, prometheus, loki, tempo, grafana, loadgen
+- `tracing.py` - `init_telemetry` (TracerProvider/LoggerProvider/MeterProvider + Baggage processors + HTTPX/Pymongo instrumentors), `BAGGAGE_FIELDS`, `rebuild_baggage_from_request`, `@traced`
+- `main.py` - `baggage_middleware` (body → baggage + `request.state`), `require_auth` dual-write, endpoints dual-write, global exception handler rebuilds baggage, `/form_B` httpx try/except → 502
+- `otel-collector-config.yaml` - OTLP receivers; logs transform embeds baggage fields into body; exports to tempo/loki/prometheus
+- `loki/loki-config.yml` - filesystem store, `allow_structured_metadata: true` (no host volume mount yet for `/loki` data)
+- `grafana/provisioning/datasources/datasource.yml` - Loki + Tempo + Prometheus
+- `grafana/provisioning/dashboards/json/internal_dashboard.json` - single-line logs panel + adhoc Filters variable
 
 ### Created
 - `tempo/tempo-config.yml` - Tempo configuration
 - `prometheus/prometheus.yml` - Prometheus scrape config
 - `grafana/provisioning/dashboards/dashboard.yml` - Dashboard provider config
-- `SESSION_CONTEXT.md` - This file
+- `docs/SESSION_CONTEXT.md` - This file
 
 ## Environment Variables
 
-| Variable | Value | Purpose |
+Loaded via `--env-file .env.uat` (or `.env.prod`); no root `.env` committed.
+
+| Variable | Example (uat) | Purpose |
 |----------|-------|---------|
-| LOKI_URL | http://loki:3100 | Loki endpoint for log export |
-| OTEL_EXPORTER_OTLP_ENDPOINT | http://tempo:4317 | Tempo endpoint for trace export |
+| APP_ENV | uat | Environment tag |
+| BAGGAGE_FIELDS | `["user_id","org_id","form_id","form_record_id"]` | Keys middleware copies body → baggage |
+| JWT_SECRET_KEY | change-me-uat | JWT signing key |
 | MONGO_URL | mongodb://mongodb:27017 | MongoDB connection |
-| JWT_SECRET_KEY | dev-secret-change-in-prod | JWT signing key |
+| OTEL_EXPORTER_OTLP_ENDPOINT | http://otel-collector:4317 | OTLP gRPC (traces/logs/metrics from app) |
+| TEMPO_ENDPOINT | tempo:4317 | Collector → Tempo |
+| LOKI_OTLP_ENDPOINT | http://loki:3100/otlp | Collector → Loki OTLP |
+| API_URL | http://api:8000 | loadgen target |
 
 ## Pending / Future Work
 
@@ -250,6 +301,7 @@ Grafana → Loki + Tempo + Prometheus (dashboards)
 - Both achieve the same result (push logs to Loki HTTP API)
 
 ### ErrorExtractionFilter Robustness Fixes
+- **Status**: Historical — `ErrorExtractionFilter` is **not in current `tracing.py`**; no action unless that class is reintroduced
 - **Problem**: Filter can crash silently on edge cases, removing itself from the logger for the rest of the session
 - **Edge cases to fix**:
   1. `exc_tb is None` → `traceback.extract_tb(None)` raises `TypeError`
@@ -257,8 +309,13 @@ Grafana → Loki + Tempo + Prometheus (dashboards)
   3. `exc_value.request is None` → `exc_value.request.url` raises `AttributeError`
 - **Fix**: Guard all access with `if exc_tb`, `if exc_value`, `exc_value.request and hasattr(...)`
 - **Also**: Check `__context__` fallback (for exceptions raised during handling, not just `raise X from Y`)
-- **File**: `tracing.py` (`ErrorExtractionFilter` class)
-- **Priority**: High — silent filter removal breaks error extraction for all subsequent logs
+- **File**: `tracing.py` (`ErrorExtractionFilter` class) — **class currently absent**
+- **Priority**: Low unless class returns — was High when filter was present
+
+### Other open items (from this session’s investigation)
+- **Loki local persistence**: `loki/loki-config.yml` uses container paths `/loki/chunks` but `docker-compose.yml` has **no volume** for `/loki` — data lives in container writable layer and is lost on recreate. Fix: mount e.g. `./loki/data:/loki`
+- **Grafana adhoc Filters vs structured metadata**: Dashboard `AdhocVariable` injects filters into the **stream selector**; only `service_name` / `service_instance_id` are stream labels. `trace_id`, `user_id`, etc. are structured metadata — filter with LogQL `| key="value"` or Explore “Filter for value”, not the dashboard Filters control ([grafana-loki-datasource#155](https://github.com/grafana/grafana-loki-datasource/issues/155))
+- **Docs drift**: `AGENTS.md`, `DESIGN.md`, `SETUP.md`, `FEATURE.md` still reference removed pieces (`TraceContextFilter`, `log_span`, `enrich_span_from_context`, `logging_config.json`, LokiHandler) — need a pass similar to this file
 
 ## Key Decisions
 
@@ -271,5 +328,7 @@ Grafana → Loki + Tempo + Prometheus (dashboards)
 7. **request.state as baggage fallback** - OTel context doesn't propagate back from endpoint handlers to middleware in async FastAPI; request.state is immune to this
 8. **Single ErrorExtractionFilter on handlers** - Avoids duplicate filter overwriting record.error; handler-level filter covers all loggers
 9. **Split stack_trace into app-only + full** - `stack_trace` = filtered app frames for quick scanning; `stack_trace_full` = complete trace for deep debugging
-10. **Nested error object over flat fields** - Keeps logs smaller; query via LogQL `| json | label_format` at query time
+10. **Nested error object over flat fields** - Keeps logs smaller; query via LogQL `| json | label_format` at query time (historical if ErrorExtractionFilter returns)
 11. **wrapLogMessage already enabled** - Dashboard logs panel has `wrapLogMessage: true` — logs display line by line; Explore view needs manual toggle
+12. **Rebuild baggage in global exception handler** - contextvars baggage is lost at the unhandled-exception boundary; `request.state` is the durable copy; `rebuild_baggage_from_request` bridges it before logging
+13. **Catch httpx errors inside endpoints when practical** - logs while baggage is still attached and return correct 5xx (502) instead of falling through to a generic 500

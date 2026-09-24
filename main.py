@@ -23,7 +23,7 @@ from opentelemetry.context import attach
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from tracing import (
-    init_telemetry, traced,
+    init_telemetry, traced, rebuild_baggage_from_request,
 )
 import db as database
 
@@ -45,7 +45,7 @@ if not logger.handlers:
 # --- Middleware ---
 
 BAGGAGE_FIELDS = set(json.loads(os.getenv("BAGGAGE_FIELDS")))
-
+# ["user_id","org_id","form_id","form_record_id"]
 
 @app.middleware("http")
 async def baggage_middleware(request: Request, call_next):
@@ -58,8 +58,7 @@ async def baggage_middleware(request: Request, call_next):
                 ctx = None
                 for key, value in data.items():
                     if key in BAGGAGE_FIELDS:
-                        # In production, body will contain: form_id, form_record_id, etc.
-                        # e.g. form_id=body.form_id
+                        setattr(request.state, key, str(value))
                         if ctx is None:
                             ctx = set_baggage(key, str(value))
                         else:
@@ -141,6 +140,7 @@ async def require_auth(
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
+    rebuild_baggage_from_request(request, fields=BAGGAGE_FIELDS)
     logger.error("Unhandled exception", exc_info=(type(exc), exc, exc.__traceback__))
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
@@ -237,9 +237,12 @@ async def form_B(request: Request, _auth=Depends(require_auth)):
         logger.info("POST /form_B rejected")
         raise HTTPException(status_code=400, detail="Form B rejected")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.get("http://192.0.2.1:9999/unreachable", timeout=2.0)
-    logger.info("POST /form_B got /dummy response", extra={"status_code": resp.status_code})
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get("http://192.0.2.1:9999/unreachable", timeout=2.0)
+    except httpx.HTTPError:
+        logger.error("Upstream call failed", exc_info=sys.exc_info())
+        raise HTTPException(status_code=502, detail="Upstream error")
 
     await simulate_work(1)
 

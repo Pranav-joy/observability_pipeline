@@ -3,6 +3,8 @@ import os
 from functools import wraps
 
 from opentelemetry import trace, metrics
+from opentelemetry.baggage import get_baggage, set_baggage
+from opentelemetry.context import attach
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.metrics import MeterProvider
@@ -22,7 +24,7 @@ from opentelemetry.instrumentation.pymongo import PymongoInstrumentor
 # --- Telemetry setup ---
 
 def init_telemetry(service_name="observability-api-1"):
-    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 
     resource = Resource.create({"service.name": service_name})
 
@@ -46,6 +48,11 @@ def init_telemetry(service_name="observability-api-1"):
     HTTPXClientInstrumentor().instrument()
     PymongoInstrumentor().instrument(capture_statement=True)
 
+    # sets global logger to use the Otel logging handler
+    # root = logging.getLogger()
+    # root.setLevel(logging.INFO)
+    # root.addHandler(otel_handler)
+
     return otel_handler
 
 
@@ -57,6 +64,17 @@ tracer = trace.get_tracer(__name__)
 # --- Baggage fields ---
 
 BAGGAGE_FIELDS = ["user_id", "org_id", "form_id", "form_record_id"]
+
+
+def rebuild_baggage_from_request(request, fields=None):
+    ctx = None
+    for key in fields if fields is not None else BAGGAGE_FIELDS:
+        val = get_baggage(key) or getattr(request.state, key, None)
+        if val:
+            val = str(val)
+            ctx = set_baggage(key, val) if ctx is None else set_baggage(key, val, context=ctx)
+    if ctx:
+        attach(ctx)
 
 
 # --- Decorator ---

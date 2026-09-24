@@ -43,8 +43,7 @@
                     "hidden": false,
                     "query": {
                       "datasource": {
-                        "name": "Loki",
-                        "uid": "loki"
+                        "name": "Loki"
                       },
                       "group": "loki",
                       "kind": "DataQuery",
@@ -84,6 +83,7 @@
               },
               "options": {
                 "dedupStrategy": "none",
+                "displayedFields": [],
                 "enableInfiniteScrolling": false,
                 "enableLogDetails": true,
                 "fontSize": "default",
@@ -163,7 +163,7 @@
         "1d"
       ],
       "fiscalYearStartMonth": 0,
-      "from": "now-6h",
+      "from": "now-5m",
       "hideTimepicker": false,
       "timezone": "browser",
       "to": "now"
@@ -172,8 +172,7 @@
     "variables": [
       {
         "datasource": {
-          "name": "Loki",
-          "uid": "loki"
+          "name": "Loki"
         },
         "group": "loki",
         "kind": "AdhocVariable",
