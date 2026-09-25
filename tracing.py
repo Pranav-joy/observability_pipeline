@@ -47,11 +47,10 @@ def init_telemetry(service_name="observability-api-1"):
 
     HTTPXClientInstrumentor().instrument()
     PymongoInstrumentor().instrument(capture_statement=True)
-
     # sets global logger to use the Otel logging handler
-    # root = logging.getLogger()
-    # root.setLevel(logging.INFO)
-    # root.addHandler(otel_handler)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(otel_handler)
 
     return otel_handler
 
