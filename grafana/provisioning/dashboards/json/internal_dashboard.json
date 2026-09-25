@@ -2,7 +2,24 @@
   "apiVersion": "dashboard.grafana.app/v2",
   "kind": "Dashboard",
   "metadata": {
-    "name": "internal-dashboard"
+    "name": "internal-dashboard",
+    "namespace": "default",
+    "uid": "3163f56c-f838-4048-8596-83518b9aac0b",
+    "resourceVersion": "1790272454455988",
+    "generation": 1,
+    "creationTimestamp": "2026-09-24T17:54:14Z",
+    "labels": {
+      "grafana.app/deprecatedInternalID": "201287159808"
+    },
+    "annotations": {
+      "grafana.app/createdBy": "access-policy:service",
+      "grafana.app/managedBy": "classic-file-provisioning",
+      "grafana.app/managerId": "default",
+      "grafana.app/sourceChecksum": "6b0ef344b3126ff1577443618293dce8",
+      "grafana.app/sourcePath": "/etc/grafana/provisioning/dashboards/json/internal_dashboard.json",
+      "grafana.app/sourceTimestamp": "1790164808000",
+      "grafana.app/folder": ""
+    }
   },
   "spec": {
     "annotations": [
@@ -171,58 +188,17 @@
     "title": "Internal Dashbard",
     "variables": [
       {
-        "datasource": {
-          "name": "Loki"
-        },
-        "group": "loki",
-        "kind": "AdhocVariable",
+        "kind": "TextVariable",
         "spec": {
-          "allowCustomValue": true,
-          "baseFilters": [],
-          "defaultKeys": [
-            {
-              "text": "trace_id",
-              "value": "trace_id"
-            },
-            {
-              "text": "user_id",
-              "value": "user_id"
-            },
-            {
-              "text": "span_id",
-              "value": "span_id"
-            },
-            {
-              "text": "level",
-              "value": "level"
-            },
-            {
-              "text": "name",
-              "value": "name"
-            },
-            {
-              "text": "service_name",
-              "value": "service_name"
-            },
-            {
-              "text": "org_id",
-              "value": "org_id"
-            },
-            {
-              "text": "form_id",
-              "value": "form_id"
-            },
-            {
-              "text": "form_record_id",
-              "value": "form_record_id"
-            }
-          ],
-          "description": "Query the Logs on attributes\n",
-          "enableGroupBy": false,
-          "filters": [],
+          "current": {
+            "text": "",
+            "value": ""
+          },
+          "description": "FIllter to query the logs based on TraceID",
           "hide": "dontHide",
-          "label": "Filters",
-          "name": "Query_On_Attributes",
+          "label": "Query_On_Trace",
+          "name": "traceID",
+          "query": "",
           "skipUrlSync": false
         }
       }

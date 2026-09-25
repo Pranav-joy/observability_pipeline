@@ -24,8 +24,8 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from tracing import (
     init_telemetry, traced, rebuild_baggage_from_request,
+    patch_uvicorn_console,
 )
-from console_logging import patch_uvicorn_console
 import db as database
 
 

@@ -1,0 +1,7 @@
+[
+    "timestamp",
+    "level",
+    "logger",
+    "message",
+    "exception"
+]

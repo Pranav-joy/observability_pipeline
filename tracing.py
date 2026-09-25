@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+import sys
 from functools import wraps
 
 from opentelemetry import trace, metrics
@@ -53,6 +55,58 @@ def init_telemetry(service_name="observability-api-1"):
     root.addHandler(otel_handler)
 
     return otel_handler
+
+
+# --- Console logging ---
+
+PAYLOAD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "payload.json")
+DEFAULT_PAYLOAD = ["timestamp", "level", "logger", "message", "exception"]
+
+
+def _load_payload():
+    try:
+        with open(PAYLOAD_PATH) as f:
+            fields = json.load(f)
+        if isinstance(fields, list) and fields:
+            return [str(field) for field in fields]
+    except (OSError, ValueError):
+        pass
+    return list(DEFAULT_PAYLOAD)
+
+
+class JsonFormatter(logging.Formatter):
+    def __init__(self, payload=None):
+        super().__init__()
+        self.payload = payload if payload is not None else _load_payload()
+
+    def format(self, record):
+        out = {}
+        for key in self.payload:
+            if key == "timestamp":
+                out[key] = self.formatTime(record, "%Y-%m-%dT%H:%M:%S.%03dZ")
+            elif key == "level":
+                out[key] = record.levelname
+            elif key == "logger":
+                out[key] = record.name
+            elif key == "message":
+                out[key] = record.getMessage()
+            elif key == "exception":
+                if record.exc_info and record.exc_info[1] is not None:
+                    out[key] = self.formatException(record.exc_info)
+            elif hasattr(record, key):
+                out[key] = getattr(record, key)
+        return json.dumps(out, default=str)
+
+
+def patch_uvicorn_console():
+    formatter = JsonFormatter()
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        logger.handlers = []
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.propagate = False
 
 
 # --- Tracer ---
