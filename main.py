@@ -25,6 +25,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from tracing import (
     init_telemetry, traced, rebuild_baggage_from_request,
 )
+from console_logging import patch_uvicorn_console
 import db as database
 
 
@@ -32,6 +33,7 @@ app = FastAPI()
 
 # --- Logging ---
 
+patch_uvicorn_console()
 otel_handler = init_telemetry()
 FastAPIInstrumentor.instrument_app(app, excluded_urls="health,metrics")
 
